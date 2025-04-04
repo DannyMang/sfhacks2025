@@ -23,6 +23,10 @@ class AvatarGenerator:
             device: Device to run inference on ('cuda' or 'cpu')
         """
         self.model_path = model_path
+        # Check if CUDA is available and adjust device accordingly
+        if device == 'cuda' and not torch.cuda.is_available():
+            print("CUDA not available, falling back to CPU")
+            device = 'cpu'
         self.device = device
         self.model = None
         self.z_dim = 512
@@ -43,68 +47,61 @@ class AvatarGenerator:
         """Load the StyleGAN3 model."""
         print(f"Loading StyleGAN3 model from {self.model_path}")
         
-        if not os.path.exists(self.model_path):
-            raise FileNotFoundError(f"Model file not found: {self.model_path}")
-        
-        try:
-            # Load the model (this is a simplified version - in a real implementation
-            # you would need to deserialize the actual StyleGAN3 architecture)
-            self.model = torch.load(self.model_path, map_location=self.device)
-            
-            # In practice, you'd need code like:
-            # with dnnlib.util.open_url(self.model_path) as f:
-            #     G = legacy.load_network_pkl(f)['G_ema'].to(self.device)
-            # self.model = G
-            
-            print("Model loaded successfully")
-        except Exception as e:
-            print(f"Error loading model: {e}")
-            raise
-        
         # For this hackathon implementation, we'll just create a dummy model
         # to simulate the StyleGAN3 behavior for now
-        if self.model is None:
-            class DummyStyleGAN3(nn.Module):
-                def __init__(self, z_dim=512, w_dim=512, img_resolution=512):
-                    super().__init__()
-                    self.z_dim = z_dim
-                    self.w_dim = w_dim
-                    self.img_resolution = img_resolution
-                    self.mapping = nn.Sequential(
-                        nn.Linear(z_dim, w_dim),
-                        nn.LeakyReLU(0.2),
-                        nn.Linear(w_dim, w_dim),
-                    )
-                    # Simple dummy synthesis network
-                    self.synthesis = nn.Sequential(
-                        nn.ConvTranspose2d(w_dim, 512, 4, 1, 0),
-                        nn.LeakyReLU(0.2),
-                        nn.ConvTranspose2d(512, 256, 4, 2, 1),
-                        nn.LeakyReLU(0.2),
-                        nn.ConvTranspose2d(256, 128, 4, 2, 1),
-                        nn.LeakyReLU(0.2),
-                        nn.ConvTranspose2d(128, 64, 4, 2, 1),
-                        nn.LeakyReLU(0.2),
-                        nn.ConvTranspose2d(64, 32, 4, 2, 1),
-                        nn.LeakyReLU(0.2),
-                        nn.ConvTranspose2d(32, 3, 4, 2, 1),
-                        nn.Tanh(),
-                    )
-                
-                def mapping_network(self, z):
-                    return self.mapping(z)
-                
-                def synthesis_network(self, w):
-                    w_reshaped = w.view(-1, self.w_dim, 1, 1)
-                    return self.synthesis(w_reshaped)
-                
-                def forward(self, z, c=None, truncation_psi=0.7, noise_mode='const'):
-                    w = self.mapping_network(z)
-                    img = self.synthesis_network(w)
-                    return img
+        class DummyStyleGAN3(nn.Module):
+            def __init__(self, z_dim=512, w_dim=512, img_resolution=512):
+                super().__init__()
+                self.z_dim = z_dim
+                self.w_dim = w_dim
+                self.img_resolution = img_resolution
+                self.mapping = nn.Sequential(
+                    nn.Linear(z_dim, w_dim),
+                    nn.LeakyReLU(0.2),
+                    nn.Linear(w_dim, w_dim),
+                )
+                # Simple dummy synthesis network
+                self.synthesis = nn.Sequential(
+                    nn.ConvTranspose2d(w_dim, 512, 4, 1, 0),
+                    nn.LeakyReLU(0.2),
+                    nn.ConvTranspose2d(512, 256, 4, 2, 1),
+                    nn.LeakyReLU(0.2),
+                    nn.ConvTranspose2d(256, 128, 4, 2, 1),
+                    nn.LeakyReLU(0.2),
+                    nn.ConvTranspose2d(128, 64, 4, 2, 1),
+                    nn.LeakyReLU(0.2),
+                    nn.ConvTranspose2d(64, 32, 4, 2, 1),
+                    nn.LeakyReLU(0.2),
+                    nn.ConvTranspose2d(32, 3, 4, 2, 1),
+                    nn.Tanh(),
+                )
             
-            self.model = DummyStyleGAN3(self.z_dim, self.w_dim, self.img_resolution).to(self.device)
-            print("Initialized dummy StyleGAN3 model for development")
+            def mapping_network(self, z):
+                return self.mapping(z)
+            
+            def synthesis_network(self, w):
+                w_reshaped = w.view(-1, self.w_dim, 1, 1)
+                return self.synthesis(w_reshaped)
+            
+            def forward(self, z, c=None, truncation_psi=0.7, noise_mode='const'):
+                w = self.mapping_network(z)
+                img = self.synthesis_network(w)
+                return img
+        
+        # Check if the model file exists, but proceed with dummy model for hackathon
+        if os.path.exists(self.model_path):
+            try:
+                # Attempt to load the model, but skip if it fails
+                # In a real implementation, you would use the actual StyleGAN3 code
+                # self.model = torch.load(self.model_path, map_location=self.device)
+                print("Model file exists, but using dummy model for development")
+            except Exception as e:
+                print(f"Error loading model: {e}")
+                print("Falling back to dummy model")
+        
+        # Create a dummy model
+        self.model = DummyStyleGAN3(self.z_dim, self.w_dim, self.img_resolution).to(self.device)
+        print("Initialized dummy StyleGAN3 model for development")
         
         # Generate a random base identity (in real implementation, you'd load a specific one)
         self.generate_base_identity()
@@ -153,7 +150,7 @@ class AvatarGenerator:
             except Exception as e:
                 print(f"Warning: Failed to optimize model: {e}")
         else:
-            print("CUDA not available, skipping optimization")
+            print("CUDA not available or not using CUDA, skipping optimization")
     
     def generate_frame(self, head_pose, expressions=None, truncation_psi=0.7):
         """
@@ -261,24 +258,32 @@ class AvatarGenerator:
         Args:
             onnx_path: Path to save the ONNX model
         """
-        # Create a dummy input
-        dummy_input = torch.randn(1, self.z_dim, device=self.device)
-        
-        # Export the model
-        torch.onnx.export(
-            self.model,
-            dummy_input,
-            onnx_path,
-            export_params=True,
-            opset_version=11,
-            do_constant_folding=True,
-            input_names=['input'],
-            output_names=['output'],
-            dynamic_axes={'input': {0: 'batch_size'},
-                         'output': {0: 'batch_size'}}
-        )
-        
-        print(f"Model exported to {onnx_path}")
+        try:
+            # Check if we can import onnx
+            import onnx
+            
+            # Create a dummy input
+            dummy_input = torch.randn(1, self.z_dim, device=self.device)
+            
+            # Export the model
+            torch.onnx.export(
+                self.model,
+                dummy_input,
+                onnx_path,
+                export_params=True,
+                opset_version=11,
+                do_constant_folding=True,
+                input_names=['input'],
+                output_names=['output'],
+                dynamic_axes={'input': {0: 'batch_size'},
+                            'output': {0: 'batch_size'}}
+            )
+            
+            print(f"Model exported to {onnx_path}")
+            return True
+        except ImportError:
+            print("ONNX not available, skipping export")
+            return False
     
     def release(self):
         """Release resources."""

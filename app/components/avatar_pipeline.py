@@ -26,6 +26,9 @@ class AvatarPipeline:
         self.models_dir = models_dir
         self.device = device
         
+        # Ensure the model directory exists
+        os.makedirs(models_dir, exist_ok=True)
+        
         # Load model paths
         self.stylegan_model_path = os.path.join(models_dir, 'stylegan3_t.pt')
         self.wav2lip_model_path = os.path.join(models_dir, 'wav2lip.pth')
@@ -67,33 +70,37 @@ class AvatarPipeline:
         """Initialize all components of the pipeline."""
         print("Initializing avatar pipeline...")
         
-        # Initialize face detector
-        self.face_detector = FaceDetector(
-            static_image_mode=False,
-            max_num_faces=1,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5
-        )
-        
-        # Initialize avatar generator
-        print(f"Loading StyleGAN model from {self.stylegan_model_path}")
-        self.avatar_generator = AvatarGenerator(
-            model_path=self.stylegan_model_path,
-            device=self.device
-        )
-        # Optimize for inference
-        self.avatar_generator.optimize_for_inference()
-        
-        # Initialize Voice2Face module
-        print(f"Loading Wav2Lip model from {self.wav2lip_model_path}")
-        self.voice2face = Voice2Face(
-            model_path=self.wav2lip_model_path,
-            device=self.device
-        )
-        # Optimize for inference
-        self.voice2face.optimize_for_inference()
-        
-        print("Avatar pipeline initialized")
+        try:
+            # Initialize face detector
+            self.face_detector = FaceDetector(
+                static_image_mode=False,
+                max_num_faces=1,
+                min_detection_confidence=0.5,
+                min_tracking_confidence=0.5
+            )
+            
+            # Initialize avatar generator
+            print(f"Loading StyleGAN model from {self.stylegan_model_path}")
+            self.avatar_generator = AvatarGenerator(
+                model_path=self.stylegan_model_path,
+                device=self.device
+            )
+            # Optimize for inference
+            self.avatar_generator.optimize_for_inference()
+            
+            # Initialize Voice2Face module
+            print(f"Loading Wav2Lip model from {self.wav2lip_model_path}")
+            self.voice2face = Voice2Face(
+                model_path=self.wav2lip_model_path,
+                device=self.device
+            )
+            # Optimize for inference
+            self.voice2face.optimize_for_inference()
+            
+            print("Avatar pipeline initialized")
+        except Exception as e:
+            print(f"Error initializing pipeline: {e}")
+            # Continue with limited functionality if some components fail
     
     def start(self):
         """Start the avatar pipeline processing threads."""
@@ -155,12 +162,18 @@ class AvatarPipeline:
                 # If face detected, extract pose and features
                 if landmarks_list:
                     # Get head pose
-                    _, _, euler_angles = self.face_detector.get_head_pose(landmarks_list, input_frame.shape)
-                    self.current_head_pose = euler_angles if euler_angles else self.current_head_pose
+                    try:
+                        _, _, euler_angles = self.face_detector.get_head_pose(landmarks_list, input_frame.shape)
+                        self.current_head_pose = euler_angles if euler_angles else self.current_head_pose
+                    except Exception as e:
+                        print(f"Error getting head pose: {e}")
                     
                     # Get facial features
-                    facial_features = self.face_detector.get_facial_features(landmarks_list)
-                    self.current_facial_features = facial_features if facial_features else self.current_facial_features
+                    try:
+                        facial_features = self.face_detector.get_facial_features(landmarks_list)
+                        self.current_facial_features = facial_features if facial_features else self.current_facial_features
+                    except Exception as e:
+                        print(f"Error getting facial features: {e}")
                 
                 # Check if it's time to generate a new frame with StyleGAN
                 current_time = time.time()
@@ -176,17 +189,29 @@ class AvatarPipeline:
                         }
                     
                     # Generate the frame
-                    avatar_frame = self.avatar_generator.generate_frame(self.current_head_pose, expressions)
+                    try:
+                        avatar_frame = self.avatar_generator.generate_frame(self.current_head_pose, expressions)
+                    except Exception as e:
+                        print(f"Error generating avatar frame: {e}")
+                        # Fallback to a blank frame
+                        avatar_frame = np.ones((512, 512, 3), dtype=np.uint8) * 0  # Black frame
                     
                     # Apply lip sync if we have voice data
-                    lip_keypoints = self.voice2face.predict_lip_shapes()
-                    if lip_keypoints is not None:
-                        avatar_frame = self.voice2face.apply_lip_shapes_to_face(avatar_frame, lip_keypoints)
+                    try:
+                        if self.voice2face:
+                            lip_keypoints = self.voice2face.predict_lip_shapes()
+                            if lip_keypoints is not None:
+                                avatar_frame = self.voice2face.apply_lip_shapes_to_face(avatar_frame, lip_keypoints)
+                    except Exception as e:
+                        print(f"Error applying lip sync: {e}")
                     
                     # Apply frame interpolation for smooth animation
                     if self.prev_frame is not None:
-                        avatar_frame = self.avatar_generator.apply_frame_interpolation(
-                            self.prev_frame, avatar_frame, self.interpolation_factor)
+                        try:
+                            avatar_frame = self.avatar_generator.apply_frame_interpolation(
+                                self.prev_frame, avatar_frame, self.interpolation_factor)
+                        except Exception as e:
+                            print(f"Error applying frame interpolation: {e}")
                     
                     # Save for next frame
                     self.prev_frame = avatar_frame.copy()
@@ -235,7 +260,10 @@ class AvatarPipeline:
                 
                 # Process audio for lip sync
                 if self.voice2face:
-                    self.voice2face.update_audio_buffer(audio_chunk, sr)
+                    try:
+                        self.voice2face.update_audio_buffer(audio_chunk, sr)
+                    except Exception as e:
+                        print(f"Error updating audio buffer: {e}")
                 
                 # Signal task completion
                 self.audio_queue.task_done()

@@ -94,7 +94,22 @@ async def startup_event():
     
     # Initialize avatar pipeline
     models_dir = os.path.join("app", "models")
-    device = "cuda" if cv2.cuda.getCudaEnabledDeviceCount() > 0 else "cpu"
+    os.makedirs(models_dir, exist_ok=True)  # Create the directory if it doesn't exist
+    
+    # Check for CUDA availability
+    device = "cpu"
+    try:
+        if cv2.cuda.getCudaEnabledDeviceCount() > 0:
+            device = "cuda"
+    except:
+        logger.warning("cv2.cuda not available, falling back to CPU")
+        
+    try:
+        import torch
+        if torch.cuda.is_available():
+            device = "cuda"
+    except:
+        logger.warning("PyTorch CUDA not available, falling back to CPU")
     
     logger.info(f"Initializing avatar pipeline with device: {device}")
     avatar_pipeline = AvatarPipeline(models_dir=models_dir, device=device)

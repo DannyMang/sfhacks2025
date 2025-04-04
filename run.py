@@ -14,6 +14,7 @@ import logging
 import threading
 import atexit
 import webbrowser
+import platform
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -43,9 +44,16 @@ def stop_all_processes():
             except Exception as e:
                 logger.error(f"Error terminating process: {e}")
 
-def start_api_server(port, debug=False):
+def start_api_server(port, debug=False, use_cpu=False):
     """Start the FastAPI backend server."""
     logger.info(f"Starting API server on port {port}...")
+    
+    env = os.environ.copy()
+    if use_cpu:
+        # Force CPU mode
+        env["CUDA_VISIBLE_DEVICES"] = ""
+        env["USE_CPU"] = "1"
+        logger.info("Running in CPU-only mode")
     
     cmd = [
         sys.executable, "-m", "uvicorn", 
@@ -62,7 +70,8 @@ def start_api_server(port, debug=False):
             cmd,
             stdout=subprocess.PIPE if not debug else None,
             stderr=subprocess.PIPE if not debug else None,
-            universal_newlines=True
+            universal_newlines=True,
+            env=env
         )
         processes.append(process)
         logger.info(f"API server started with PID {process.pid}")
@@ -106,11 +115,18 @@ def start_frontend_server(port, no_browser=False):
         logger.error(f"Failed to start frontend server: {e}")
         return None
 
-def download_models():
+def download_models(dummy=False, force=False):
     """Run the script to download pre-trained models."""
     logger.info("Downloading pre-trained models...")
     
     cmd = [sys.executable, "download_models.py"]
+    
+    if dummy:
+        cmd.append("--dummy")
+        logger.info("Using dummy model files for development")
+    
+    if force:
+        cmd.append("--force")
     
     try:
         process = subprocess.run(
@@ -131,8 +147,43 @@ def download_models():
     
     return True
 
+def check_dependencies():
+    """Check if required Python packages are installed."""
+    logger.info("Checking dependencies...")
+    
+    # Check if we're on macOS
+    is_macos = platform.system() == "Darwin"
+    req_file = "requirements-macos.txt" if is_macos else "requirements.txt"
+    
+    if not os.path.exists(req_file):
+        if is_macos and os.path.exists("requirements.txt"):
+            logger.warning(f"No macOS-specific requirements file found. Using general requirements file.")
+            req_file = "requirements.txt"
+        else:
+            logger.error(f"Requirements file '{req_file}' not found.")
+            return False
+    
+    try:
+        cmd = [sys.executable, "-m", "pip", "install", "-r", req_file]
+        process = subprocess.run(
+            cmd,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True
+        )
+        logger.info(f"Dependencies installed from {req_file}")
+        return True
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Failed to install dependencies: {e}")
+        logger.error(f"Error output: {e.stderr}")
+        return False
+
 def log_monitor(process, prefix):
     """Monitor and log process output."""
+    if process.stdout is None or process.stderr is None:
+        return
+        
     while process.poll() is None:
         # Read stdout
         line = process.stdout.readline()
@@ -151,6 +202,23 @@ def open_browser(port):
     logger.info(f"Opening browser at {url}")
     webbrowser.open(url)
 
+def check_cuda_availability():
+    """Check if CUDA is available for PyTorch."""
+    try:
+        import torch
+        cuda_available = torch.cuda.is_available()
+        if cuda_available:
+            logger.info(f"CUDA is available: {torch.cuda.get_device_name(0)}")
+        else:
+            logger.warning("CUDA is not available. Running in CPU mode (this will be slow).")
+        return cuda_available
+    except ImportError:
+        logger.warning("PyTorch not installed yet. Cannot check CUDA availability.")
+        return False
+    except Exception as e:
+        logger.warning(f"Error checking CUDA availability: {e}")
+        return False
+
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(description="Real-Time Avatar System Launcher")
@@ -159,6 +227,10 @@ def main():
     parser.add_argument("--debug", action="store_true", help="Enable debug mode")
     parser.add_argument("--no-browser", action="store_true", help="Do not open a browser automatically")
     parser.add_argument("--skip-download", action="store_true", help="Skip downloading models")
+    parser.add_argument("--skip-deps", action="store_true", help="Skip dependency installation")
+    parser.add_argument("--dummy-models", action="store_true", help="Use dummy model files for development")
+    parser.add_argument("--force-download", action="store_true", help="Force re-download of models")
+    parser.add_argument("--cpu", action="store_true", help="Force CPU mode even if CUDA is available")
     
     args = parser.parse_args()
     
@@ -167,14 +239,33 @@ def main():
     signal.signal(signal.SIGTERM, signal_handler)
     atexit.register(stop_all_processes)
     
-    # Download models if needed
-    if not args.skip_download:
-        if not download_models():
-            logger.error("Failed to download required models. Exiting.")
+    # Check system info
+    system_info = platform.system()
+    logger.info(f"Running on {system_info} {platform.release()}")
+    
+    # Check if we need to use CPU
+    use_cpu = args.cpu
+    if not use_cpu and not check_cuda_availability():
+        use_cpu = True
+        logger.info("Defaulting to CPU mode")
+    
+    # Install dependencies if needed
+    if not args.skip_deps:
+        if not check_dependencies():
+            logger.error("Failed to install required dependencies. Exiting.")
             sys.exit(1)
     
+    # Create necessary directories
+    os.makedirs(os.path.join("app", "models"), exist_ok=True)
+    
+    # Download models if needed
+    if not args.skip_download:
+        if not download_models(args.dummy_models, args.force_download):
+            logger.warning("Model download incomplete. Some features may not work.")
+            # Continue anyway with warning
+    
     # Start the API server
-    api_process = start_api_server(args.api_port, args.debug)
+    api_process = start_api_server(args.api_port, args.debug, use_cpu)
     if not api_process:
         logger.error("Failed to start API server. Exiting.")
         sys.exit(1)
@@ -190,11 +281,11 @@ def main():
         threading.Thread(target=open_browser, args=(args.frontend_port,), daemon=True).start()
     
     # Monitor server outputs
-    api_monitor = threading.Thread(target=log_monitor, args=(api_process, "API"), daemon=True)
-    frontend_monitor = threading.Thread(target=log_monitor, args=(frontend_process, "Frontend"), daemon=True)
-    
-    api_monitor.start()
-    frontend_monitor.start()
+    if not args.debug:  # Only monitor logs if not in debug mode
+        api_monitor = threading.Thread(target=log_monitor, args=(api_process, "API"), daemon=True)
+        frontend_monitor = threading.Thread(target=log_monitor, args=(frontend_process, "Frontend"), daemon=True)
+        api_monitor.start()
+        frontend_monitor.start()
     
     logger.info(f"Real-Time Avatar System started")
     logger.info(f"API server: http://localhost:{args.api_port}")
