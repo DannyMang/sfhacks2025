@@ -54,12 +54,11 @@ function App() {
       
       ws.onmessage = function(event) {
         const data = JSON.parse(event.data);
+        console.log('Received WebSocket message:', data);
         
-        if (data.frame_data) {
-          renderAvatarFrame(data.frame_data);
-          if (data.latency) {
-            setLatency((data.latency * 1000).toFixed(1));
-          }
+        if (data.type === 'video' && data.frame) {
+          console.log('Rendering frame');
+          renderAvatarFrame(data.frame);
           framesReceivedRef.current++;
         }
       };
@@ -219,7 +218,7 @@ function App() {
   };
   
   // Render avatar frame
-  const renderAvatarFrame = (base64Data) => {
+  const renderAvatarFrame = (frameData) => {
     if (!avatarCanvasRef.current) return;
     
     const canvas = avatarCanvasRef.current;
@@ -227,9 +226,9 @@ function App() {
     
     const img = new Image();
     img.onload = function() {
-      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
     };
-    img.src = 'data:image/jpeg;base64,' + base64Data;
+    img.src = frameData;  // Use the frame data directly since it already includes the prefix
   };
   
   // FPS counter

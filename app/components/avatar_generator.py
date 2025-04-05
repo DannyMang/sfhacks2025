@@ -15,204 +15,94 @@ from PIL import Image
 import logging
 import traceback
 import pickle
+import sys
 
 class AvatarGenerator:
-    def __init__(self, model_path, device='cuda'):
-        """
-        Initialize the avatar generator.
-        
-        Args:
-            model_path: Path to the StyleGAN3 model checkpoint
-            device: Device to run inference on ('cuda' or 'cpu')
-        """
+    def __init__(self, model_path, device='cpu'):
         self.logger = logging.getLogger(__name__)
-        self.model_path = model_path
-        # Check if CUDA is available and adjust device accordingly
-        if device == 'cuda' and not torch.cuda.is_available():
-            self.logger.warning("CUDA not available, falling back to CPU")
-            device = 'cpu'
-        self.device = device
-        self.model = None
-        self.z_dim = 512
-        self.c_dim = 0  # No class conditioning in this implementation
-        self.w_dim = 512
-        self.img_resolution = 512  # We'll use 512x512 for faster inference
+        self.logger.info("Initializing AvatarGenerator with StyleGAN3")
         
-        # Define latent code for base identity (will be set later)
-        self.base_w = None
+        # Get absolute paths
+        model_dir = os.path.dirname(os.path.abspath(model_path))
+        stylegan3_dir = os.path.join(model_dir, 'stylegan3')
         
-        # For performance tracking
-        self.inference_time = 0
+        # Add to Python path
+        if stylegan3_dir not in sys.path:
+            sys.path.insert(0, stylegan3_dir)
+            self.logger.info(f"Added StyleGAN3 path: {stylegan3_dir}")
         
-        # Load model
-        self.load_model()
-        
-    def load_model(self):
-        """Load the StyleGAN3 model."""
-        self.logger.info(f"Loading StyleGAN3 model from {self.model_path}")
-        
+        # Load StyleGAN3 model
         try:
-            # Add StyleGAN3 repo to path
-            import sys
-            stylegan3_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'stylegan3')
-            if stylegan3_path not in sys.path:
-                sys.path.append(stylegan3_path)
-            
-            # Now try to import the required modules
-            import torch_utils  # This should work now
             import dnnlib
+            import legacy
             
-            # Log file details
-            if os.path.exists(self.model_path):
-                size_mb = os.path.getsize(self.model_path) / (1024 * 1024)
-                self.logger.info(f"Found model file: {self.model_path} (size: {size_mb:.2f} MB)")
-            else:
-                self.logger.error(f"Model file not found: {self.model_path}")
-                raise FileNotFoundError(f"Model file not found: {self.model_path}")
+            self.logger.info("Loading StyleGAN3 model...")
+            with dnnlib.util.open_url(model_path) as f:
+                self.model = legacy.load_network_pkl(f)['G_ema'].to(device)
+            self.model.eval()
+            self.device = device
             
-            # Load pickle file with custom unpickler
-            self.logger.debug("Attempting to load pickle model...")
-            with dnnlib.util.open_url(self.model_path) as f:
-                self.model = pickle.load(f)
-            
-            self.logger.debug(f"Model type: {type(self.model)}")
-            
-            # Move to device if it's a torch model
-            if hasattr(self.model, 'to'):
-                self.model.to(self.device)
-            
-            self.logger.info("Model loaded successfully")
-            return True
+            # Generate random latent vector for initialization
+            self.latent = torch.randn(1, self.model.z_dim).to(device)
+            # Add class conditioning vector (usually zeros for unconditional models)
+            self.class_vector = torch.zeros([1, self.model.c_dim], device=device)
+            self.logger.info("StyleGAN3 model loaded successfully")
             
         except Exception as e:
-            self.logger.error(f"Failed to load StyleGAN3 model: {str(e)}")
+            self.logger.error(f"Failed to load StyleGAN3: {e}")
             self.logger.error(traceback.format_exc())
-            raise
-    
-    def generate_base_identity(self):
-        """Generate a base identity for the avatar."""
-        # In practice, you'd want to carefully select this from a set of pre-generated
-        # identities, but for a hackathon we'll just generate a random one
-        torch.manual_seed(42)  # For reproducibility
-        z = torch.randn(1, self.z_dim, device=self.device)
-        
-        # Map to W space
-        with torch.no_grad():
-            # This is simplified - actual StyleGAN3 would use a mapping network
-            if hasattr(self.model, 'mapping_network'):
-                self.base_w = self.model.mapping_network(z)
-            else:
-                # Simplified fallback
-                self.base_w = z  # Just use Z as W for the dummy implementation
-        
-        self.logger.info("Generated base identity")
-    
-    def optimize_for_inference(self):
-        """Optimize the model for inference using TensorRT or other methods."""
-        # This is a placeholder for real optimization that would happen in production
-        self.logger.info("Optimizing model for inference...")
-        
-        # In reality, you would:
-        # 1. Quantize the model to FP16 or INT8
-        # 2. Export to ONNX
-        # 3. Convert to TensorRT
-        # 4. Optimize the inference pipeline
-        
-        # Simulate model optimization
-        if self.device == 'cuda' and torch.cuda.is_available():
-            # Freeze model parameters
-            for param in self.model.parameters():
-                param.requires_grad = False
+            self.model = None
+
+        self.frame_count = 0
+
+    def generate_frame(self, head_pose=None, expressions=None):
+        if self.model is None:
+            return None
             
-            # Use torch.jit.script to optimize
-            try:
-                # Note: This is a simplified version. In reality, tracing StyleGAN3
-                # would be more complex due to its dynamic nature
-                self.model = torch.jit.script(self.model)
-                self.logger.info("Model optimized with torch.jit.script")
-            except Exception as e:
-                self.logger.warning(f"Failed to optimize model: {e}")
-        else:
-            self.logger.info("CUDA not available or not using CUDA, skipping optimization")
-    
-    def generate_frame(self, head_pose, expressions=None, truncation_psi=0.7):
-        """
-        Generate an avatar frame based on the detected head pose and expressions.
-        
-        Args:
-            head_pose: [pitch, yaw, roll] angles in degrees
-            expressions: Dictionary of facial expression parameters
-            truncation_psi: Controls variation strength (lower = closer to average face)
+        try:
+            self.logger.info("Generating StyleGAN3 frame")
             
-        Returns:
-            frame: Generated avatar frame as numpy array
-        """
-        start_time = time.time()
-        
-        # Convert head pose to tensor
-        if head_pose is not None:
-            pitch, yaw, roll = head_pose
-            pose_tensor = torch.tensor([[pitch, yaw, roll]], dtype=torch.float32, device=self.device)
-            pose_tensor = pose_tensor / 90.0  # Normalize to [-1, 1] range
-        else:
-            # Default pose (looking straight ahead)
-            pose_tensor = torch.tensor([[0.0, 0.0, 0.0]], dtype=torch.float32, device=self.device)
-        
-        # Convert expressions to tensor if provided
-        if expressions is not None:
-            # Map expression dict to tensor (simplified for hackathon)
-            # In real implementation, this would be a more sophisticated mapping
-            expr_values = [
-                expressions.get('smile', 0.0),
-                expressions.get('eye_open', 1.0),
-                expressions.get('brow_up', 0.0)
-            ]
-            expr_tensor = torch.tensor([expr_values], dtype=torch.float32, device=self.device)
-        else:
-            # Default neutral expression
-            expr_tensor = torch.tensor([[0.0, 1.0, 0.0]], dtype=torch.float32, device=self.device)
-        
-        # Combine base identity with pose and expression
-        # This is a simplified approach - in reality you would use more sophisticated
-        # methods to control StyleGAN3 with pose and expressions
-        with torch.no_grad():
-            # Create a modified W latent based on pose and expression
-            w = self.base_w.clone()
-            
-            # Apply pose and expression modifications to specific dimensions
-            # These indices would need to be determined through disentanglement studies
-            # For hackathon, we're using placeholder values:
-            pose_dims = [0, 1, 2]  # First few dimensions for pose
-            expr_dims = [3, 4, 5]  # Next few dimensions for expression
-            
-            # Apply pose (very simplified approach)
-            for i, dim in enumerate(pose_dims):
-                if i < pose_tensor.shape[1]:
-                    w[0, dim] = w[0, dim] + pose_tensor[0, i] * 0.5
-            
-            # Apply expressions (very simplified approach)
-            for i, dim in enumerate(expr_dims):
-                if i < expr_tensor.shape[1]:
-                    w[0, dim] = w[0, dim] + expr_tensor[0, i] * 0.5
-            
-            # Generate image
-            # In real StyleGAN3, this would be:
-            # img = self.model.synthesis(w, noise_mode='const')
-            
-            # For our simplified implementation:
-            if hasattr(self.model, 'synthesis_network'):
-                img = self.model.synthesis_network(w)
-            else:
-                # Fallback for dummy model
-                img = self.model(w)
-        
-        # Convert to numpy array
-        img = img.permute(0, 2, 3, 1).cpu().numpy()
-        img = np.clip((img[0] + 1) * 127.5, 0, 255).astype(np.uint8)
-        
-        self.inference_time = time.time() - start_time
-        
-        return img
+            with torch.no_grad():
+                # Update latent vector based on head pose if provided
+                if head_pose is not None:
+                    # Simple mapping of head pose to latent space
+                    pose_scale = 0.1
+                    
+                    # Create a pose tensor of the same size as latent
+                    pose_tensor = torch.zeros_like(self.latent)
+                    
+                    if isinstance(head_pose, list):
+                        # Map the first 3 dimensions of latent space to pose
+                        pose_tensor[0, :3] = torch.tensor([
+                            head_pose[0] * pose_scale,
+                            head_pose[1] * pose_scale,
+                            head_pose[2] * pose_scale
+                        ]).to(self.device)
+                    else:
+                        pose_tensor[0, :3] = torch.tensor([
+                            head_pose['pitch'] * pose_scale,
+                            head_pose['yaw'] * pose_scale,
+                            head_pose['roll'] * pose_scale
+                        ]).to(self.device)
+                    
+                    # Add the pose influence to latent
+                    self.latent = self.latent + pose_tensor
+                
+                # Generate image with both z and c inputs
+                img = self.model(self.latent, self.class_vector)
+                
+                # Convert to numpy array
+                img = (img.permute(0, 2, 3, 1) * 127.5 + 128).clamp(0, 255).to(torch.uint8)
+                img = img[0].cpu().numpy()
+                
+                self.frame_count += 1
+                self.logger.info(f"Generated StyleGAN3 frame {self.frame_count}")
+                return img
+                
+        except Exception as e:
+            self.logger.error(f"Error generating StyleGAN3 frame: {str(e)}")
+            self.logger.error(traceback.format_exc())
+            return None
     
     def apply_frame_interpolation(self, prev_frame, current_frame, factor=0.5):
         """

@@ -17,6 +17,7 @@ from typing import Optional, Tuple, Dict
 from app.utils.face_detector import FaceDetector
 from app.components.avatar_generator import AvatarGenerator
 from app.components.voice2face import Voice2Face
+import traceback
 
 class AvatarPipeline:
     def __init__(self, model_paths: Dict[str, str], device: str = 'cuda'):
@@ -108,38 +109,75 @@ class AvatarPipeline:
     async def process_frame(self, frame_data: str) -> Optional[str]:
         """Process a single video frame."""
         if not self.is_running.is_set():
+            self.logger.warning("Pipeline not running")
             return None
-            
+        
         try:
-            # Decode base64 frame
-            image_data = base64.b64decode(frame_data)
-            nparr = np.frombuffer(image_data, np.uint8)
-            frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            # Log frame data length for debugging
+            self.logger.debug(f"Received frame data length: {len(frame_data) if frame_data else 0}")
             
-            if frame is None:
-                self.logger.error("Failed to decode frame")
+            # Decode base64 frame
+            if not frame_data:
+                self.logger.warning("Empty frame data received")
+                return None
+            
+            try:
+                # Split off the data URL prefix if present
+                if ',' in frame_data:
+                    self.logger.debug("Frame data contains data URL prefix")
+                    frame_data = frame_data.split(',')[1]
+                
+                image_data = base64.b64decode(frame_data)
+                self.logger.debug(f"Decoded image data size: {len(image_data)} bytes")
+                
+                nparr = np.frombuffer(image_data, np.uint8)
+                frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                
+                if frame is None:
+                    self.logger.error("Failed to decode frame")
+                    return None
+                
+                self.logger.debug(f"Decoded frame shape: {frame.shape}")
+                
+            except Exception as e:
+                self.logger.error(f"Error decoding frame: {e}")
                 return None
             
             # Detect face landmarks
+            self.logger.debug("Detecting face landmarks")
             landmarks = self.face_detector.detect(frame)
             if landmarks is None:
-                return None
-            
-            # Get head pose from landmarks
-            head_pose = self.face_detector.get_head_pose(landmarks, frame)
+                self.logger.warning("No face detected in frame - using default pose")
+                head_pose = None  # Use default pose instead of returning None
+            else:
+                head_pose = self.face_detector.get_head_pose(landmarks, frame)
             
             # Generate avatar frame
+            self.logger.info("Generating avatar frame")
             avatar_frame = self.avatar_generator.generate_frame(
                 head_pose=head_pose,
-                expressions=None  # TODO: Add expression support
+                expressions=None
             )
             
+            if avatar_frame is None:
+                self.logger.warning("Failed to generate avatar frame")
+                return None
+            
+            self.logger.debug(f"Generated avatar frame shape: {avatar_frame.shape}")
+            
             # Encode frame for sending
-            _, buffer = cv2.imencode('.jpg', avatar_frame)
-            return base64.b64encode(buffer).decode('utf-8')
+            try:
+                _, buffer = cv2.imencode('.jpg', avatar_frame)
+                encoded_frame = base64.b64encode(buffer).decode('utf-8')
+                self.logger.debug(f"Encoded frame size: {len(encoded_frame)} bytes")
+                return f"data:image/jpeg;base64,{encoded_frame}"
+            except Exception as e:
+                self.logger.error(f"Error encoding frame: {e}")
+                return None
             
         except Exception as e:
-            self.logger.error(f"Error processing frame: {e}")
+            self.logger.error(f"Error in process_frame: {e}")
+            self.logger.error(traceback.format_exc())
             return None
 
     async def process_audio(self, audio_data: bytes):

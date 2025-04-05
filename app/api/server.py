@@ -18,6 +18,7 @@ from typing import Optional
 import torch
 import traceback
 from datetime import datetime
+import json
 
 # Create logs directory
 logs_dir = 'logs'
@@ -140,64 +141,40 @@ async def websocket_endpoint(websocket: WebSocket):
                 "type": "error",
                 "message": "Avatar pipeline not initialized"
             })
+            return
         
+        logger.info("Starting WebSocket communication loop")
         while True:
             try:
-                data = await websocket.receive_json()
-                logger.debug(f"Received WebSocket data: {data['type']}")
+                message = await websocket.receive()
+                logger.debug(f"Received raw WebSocket message: {message}")
                 
-                if "type" not in data:
-                    logger.warning("Received message without type field")
-                    continue
-                    
-                if data["type"] == "video":
-                    # Process video frame
-                    if "data" not in data:
-                        logger.warning("Video message missing data field")
-                        continue
+                if message["type"] == "websocket.receive":
+                    if "text" in message:
+                        data = json.loads(message["text"])
+                        frame_data = data.get("frame_data", "")
                         
-                    if pipeline:
-                        frame_data = data["data"]
-                        result = await pipeline.process_frame(frame_data)
-                        if result:
-                            await websocket.send_json({
-                                "type": "video",
-                                "data": result
-                            })
+                        if frame_data:
+                            logger.debug("Processing video frame")
+                            # Process the frame through the pipeline
+                            result = await pipeline.process_frame(frame_data)
+                            if result:
+                                await websocket.send_json({
+                                    "type": "video",
+                                    "frame": result
+                                })
+                                logger.debug("Sent processed frame")
+                            else:
+                                # Send placeholder if processing fails
+                                placeholder = create_placeholder_image()
+                                await websocket.send_json({
+                                    "type": "video",
+                                    "frame": placeholder
+                                })
+                                logger.debug("Sent placeholder frame")
                         else:
-                            logger.warning("Frame processing returned no result")
-                            # Send placeholder response for testing
-                            placeholder = create_placeholder_image()
-                            await websocket.send_json({
-                                "type": "video",
-                                "data": placeholder
-                            })
-                    else:
-                        logger.warning("Pipeline not available, sending placeholder")
-                        # Pipeline not available, send placeholder
-                        placeholder = create_placeholder_image()
-                        await websocket.send_json({
-                            "type": "video",
-                            "data": placeholder
-                        })
-                        
-                elif data["type"] == "audio":
-                    # Process audio data
-                    if "data" not in data:
-                        logger.warning("Audio message missing data field")
-                        continue
-                        
-                    if pipeline:
-                        audio_data = base64.b64decode(data["data"])
-                        await pipeline.process_audio(audio_data)
-                        
-                elif data["type"] == "ping":
-                    # Respond to ping with pong
-                    await websocket.send_json({
-                        "type": "pong",
-                        "timestamp": data.get("timestamp", 0)
-                    })
-                    
+                            logger.debug("Empty frame data received")
+                            
             except WebSocketDisconnect:
                 logger.info("Client disconnected")
                 break
