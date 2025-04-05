@@ -1,335 +1,205 @@
 #!/usr/bin/env python3
 """
-Launcher script for the real-time avatar system.
-This script starts both the backend API server and the frontend web server.
+Launcher script for the Real-Time Avatar System.
+Starts both the backend API server and the frontend web server.
 """
 
 import os
 import sys
-import argparse
-import subprocess
 import time
 import signal
 import logging
-import threading
-import atexit
-import webbrowser
-import platform
-import gdown
+import subprocess
+import argparse
+from typing import Optional, List
+import socket
+from contextlib import closing
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
-# Global variables to track processes
-processes = []
-
-# Define model URLs and output paths
-MODEL_URLS = {
-    'stylegan3_t.pt': 'https://drive.google.com/uc?id=1Yr7KuD959btpmcKGAUsbAk5rPjX2MytK',
-    'wav2lip.pth': 'https://drive.google.com/uc?id=1Yr7KuD959btpmcKGAUsbAk5rPjX2MytK'
-}
-
-MODEL_DIR = 'app/models'
-
-def signal_handler(sig, frame):
-    """Handle keyboard interrupt (Ctrl+C)."""
-    logger.info("Shutting down avatar system...")
-    stop_all_processes()
-    sys.exit(0)
-
-def stop_all_processes():
-    """Stop all running processes."""
-    for process in processes:
-        if process and process.poll() is None:  # Check if process exists and is running
-            logger.info(f"Terminating process PID {process.pid}")
+def find_free_port(start_port: int, max_attempts: int = 10) -> Optional[int]:
+    """Find a free port starting from start_port."""
+    for port in range(start_port, start_port + max_attempts):
+        with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
             try:
-                process.terminate()
-                # Wait for a moment to give process time to terminate
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                logger.warning(f"Process {process.pid} did not terminate gracefully, killing...")
-                process.kill()
-            except Exception as e:
-                logger.error(f"Error terminating process: {e}")
+                s.bind(('', port))
+                return port
+            except OSError:
+                continue
+    return None
 
-def start_api_server(port, debug=False, use_cpu=False):
-    """Start the FastAPI backend server."""
-    logger.info(f"Starting API server on port {port}...")
+def check_dependencies():
+    """Check if all required dependencies are installed."""
+    logger.info("Checking dependencies...")
     
-    env = os.environ.copy()
-    if use_cpu:
-        # Force CPU mode
-        env["CUDA_VISIBLE_DEVICES"] = ""
-        env["USE_CPU"] = "1"
-        logger.info("Running in CPU-only mode")
-    
-    cmd = [
-        sys.executable, "-m", "uvicorn", 
-        "app.api.server:app", 
-        "--host", "0.0.0.0", 
-        "--port", str(port)
-    ]
-    
-    if debug:
-        cmd.append("--reload")
+    # First check if packages are already installed
+    try:
+        import fastapi
+        import uvicorn
+        import torch
+        import cv2
+        import numpy
+        import base64
+        import asyncio
+        logger.info("All required packages are already installed")
+        return
+    except ImportError as e:
+        logger.info(f"Some packages missing: {e}")
     
     try:
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE if not debug else None,
-            stderr=subprocess.PIPE if not debug else None,
-            universal_newlines=True,
-            env=env
+        # Try to install from requirements-macos.txt first
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-r", "requirements-macos.txt"],
+            check=True
         )
-        processes.append(process)
-        logger.info(f"API server started with PID {process.pid}")
-        
-        # Wait a moment to ensure the server starts
-        time.sleep(2)
-        
-        return process
-    except Exception as e:
-        logger.error(f"Failed to start API server: {e}")
-        return None
+        logger.info("Dependencies installed from requirements-macos.txt")
+    except subprocess.CalledProcessError:
+        try:
+            # Fall back to requirements.txt if macos version fails
+            subprocess.run(
+                [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
+                check=True
+            )
+            logger.info("Dependencies installed from requirements.txt")
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Failed to install dependencies: {e}")
+            sys.exit(1)
 
-def start_frontend_server(port, no_browser=False):
-    """Start the frontend web server."""
-    logger.info(f"Starting frontend server on port {port}...")
-    
-    cmd = [
-        sys.executable, 
-        os.path.join("app", "frontend.py"),
-        "--port", str(port),
-    ]
-    
-    if no_browser:
-        cmd.append("--no-browser")
-    
-    try:
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            universal_newlines=True
-        )
-        processes.append(process)
-        logger.info(f"Frontend server started with PID {process.pid}")
-        
-        # Wait a moment to ensure the server starts
-        time.sleep(1)
-        
-        return process
-    except Exception as e:
-        logger.error(f"Failed to start frontend server: {e}")
-        return None
-
-def download_models(dummy=False, force=False):
-    """Run the script to download pre-trained models."""
+def download_models(use_dummy: bool = False):
+    """Download pre-trained models or use dummy models."""
     logger.info("Downloading pre-trained models...")
-    
-    if not os.path.exists(MODEL_DIR):
-        os.makedirs(MODEL_DIR)
-    
-    for model_name, url in MODEL_URLS.items():
-        output_path = os.path.join(MODEL_DIR, model_name)
-        if not os.path.exists(output_path):
-            logger.info(f"Downloading {model_name}...")
-            try:
-                gdown.download(url, output_path, quiet=False)
-                logger.info(f"Successfully downloaded {model_name}")
-            except Exception as e:
-                logger.error(f"Error downloading {model_name}: {e}")
-        else:
-            logger.info(f"{model_name} already exists, skipping download.")
-
-    if dummy:
-        logger.info("Using dummy model files for development")
-    
-    if force:
-        logger.info("Force re-download of models")
-    
     try:
-        process = subprocess.run(
-            [sys.executable, "download_models.py"],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            universal_newlines=True
-        )
+        if use_dummy:
+            logger.info("Using dummy model files for development")
+            # Create dummy model files if they don't exist
+            model_dir = "app/models"
+            os.makedirs(model_dir, exist_ok=True)
+            dummy_files = ["stylegan3_t.pt", "wav2lip.pth", "first_order_model.pth"]
+            for file in dummy_files:
+                file_path = os.path.join(model_dir, file)
+                if not os.path.exists(file_path):
+                    with open(file_path, "w") as f:
+                        f.write("Dummy model file for development")
+        else:
+            subprocess.run([sys.executable, "download_models.py"], check=True)
         logger.info("Models downloaded successfully")
     except subprocess.CalledProcessError as e:
         logger.error(f"Failed to download models: {e}")
-        logger.error(f"Error output: {e.stderr}")
-        return False
-    except Exception as e:
-        logger.error(f"Error downloading models: {e}")
-        return False
-    
-    return True
+        sys.exit(1)
 
-def check_dependencies():
-    """Check if required Python packages are installed."""
-    logger.info("Checking dependencies...")
-    
-    # Check if we're on macOS
-    is_macos = platform.system() == "Darwin"
-    req_file = "requirements-macos.txt" if is_macos else "requirements.txt"
-    
-    if not os.path.exists(req_file):
-        if is_macos and os.path.exists("requirements.txt"):
-            logger.warning(f"No macOS-specific requirements file found. Using general requirements file.")
-            req_file = "requirements.txt"
-        else:
-            logger.error(f"Requirements file '{req_file}' not found.")
-            return False
+def start_api_server(port: int = 8000, use_cpu: bool = False) -> subprocess.Popen:
+    """Start the FastAPI backend server."""
+    logger.info(f"Starting API server on port {port}...")
+    if use_cpu:
+        logger.info("Running in CPU-only mode")
+        cmd = [sys.executable, "app/api/server.py", "--port", str(port), "--cpu"]
+    else:
+        cmd = [sys.executable, "app/api/server.py", "--port", str(port)]
     
     try:
-        cmd = [sys.executable, "-m", "pip", "install", "-r", req_file]
-        process = subprocess.run(
+        process = subprocess.Popen(
             cmd,
-            check=True,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
             universal_newlines=True
         )
-        logger.info(f"Dependencies installed from {req_file}")
-        return True
-    except subprocess.CalledProcessError as e:
-        logger.error(f"Failed to install dependencies: {e}")
-        logger.error(f"Error output: {e.stderr}")
-        return False
-
-def log_monitor(process, prefix):
-    """Monitor and log process output."""
-    if process.stdout is None or process.stderr is None:
-        return
-        
-    while process.poll() is None:
-        # Read stdout
-        line = process.stdout.readline()
-        if line:
-            logger.info(f"{prefix}: {line.strip()}")
-        
-        # Read stderr
-        err_line = process.stderr.readline()
-        if err_line:
-            logger.error(f"{prefix} ERR: {err_line.strip()}")
-
-def open_browser(port):
-    """Open the browser after a short delay."""
-    time.sleep(3)  # Give the servers time to start
-    url = f"http://localhost:{port}"
-    logger.info(f"Opening browser at {url}")
-    webbrowser.open(url)
-
-def check_cuda_availability():
-    """Check if CUDA is available for PyTorch."""
-    try:
-        import torch
-        cuda_available = torch.cuda.is_available()
-        if cuda_available:
-            logger.info(f"CUDA is available: {torch.cuda.get_device_name(0)}")
-        else:
-            logger.warning("CUDA is not available. Running in CPU mode (this will be slow).")
-        return cuda_available
-    except ImportError:
-        logger.warning("PyTorch not installed yet. Cannot check CUDA availability.")
-        return False
+        logger.info(f"API server started with PID {process.pid}")
+        return process
     except Exception as e:
-        logger.warning(f"Error checking CUDA availability: {e}")
-        return False
+        logger.error(f"Failed to start API server: {e}")
+        sys.exit(1)
+
+def start_frontend_server(port: int = 8080) -> subprocess.Popen:
+    """Start the frontend web server."""
+    logger.info(f"Starting frontend server on port {port}...")
+    try:
+        process = subprocess.Popen(
+            [sys.executable, "-m", "http.server", str(port)],
+            cwd="app",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            universal_newlines=True
+        )
+        logger.info(f"Frontend server started with PID {process.pid}")
+        return process
+    except Exception as e:
+        logger.error(f"Failed to start frontend server: {e}")
+        sys.exit(1)
 
 def main():
-    """Main entry point."""
-    parser = argparse.ArgumentParser(description="Real-Time Avatar System Launcher")
+    parser = argparse.ArgumentParser(description="Launch the Real-Time Avatar System")
+    parser.add_argument("--cpu", action="store_true", help="Run in CPU-only mode")
+    parser.add_argument("--dummy-models", action="store_true", help="Use dummy models for development")
     parser.add_argument("--api-port", type=int, default=8000, help="Port for the API server")
     parser.add_argument("--frontend-port", type=int, default=8080, help="Port for the frontend server")
-    parser.add_argument("--debug", action="store_true", help="Enable debug mode")
-    parser.add_argument("--no-browser", action="store_true", help="Do not open a browser automatically")
-    parser.add_argument("--skip-download", action="store_true", help="Skip downloading models")
-    parser.add_argument("--skip-deps", action="store_true", help="Skip dependency installation")
-    parser.add_argument("--dummy-models", action="store_true", help="Use dummy model files for development")
-    parser.add_argument("--force-download", action="store_true", help="Force re-download of models")
-    parser.add_argument("--cpu", action="store_true", help="Force CPU mode even if CUDA is available")
-    
     args = parser.parse_args()
+
+    # Find free ports if the specified ones are in use
+    api_port = find_free_port(args.api_port)
+    frontend_port = find_free_port(args.frontend_port)
     
-    # Register cleanup handlers
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-    atexit.register(stop_all_processes)
-    
-    # Check system info
-    system_info = platform.system()
-    logger.info(f"Running on {system_info} {platform.release()}")
-    
-    # Check if we need to use CPU
-    use_cpu = args.cpu
-    if not use_cpu and not check_cuda_availability():
-        use_cpu = True
-        logger.info("Defaulting to CPU mode")
-    
-    # Install dependencies if needed
-    if not args.skip_deps:
-        if not check_dependencies():
-            logger.error("Failed to install required dependencies. Exiting.")
-            sys.exit(1)
-    
-    # Create necessary directories
-    os.makedirs(os.path.join("app", "models"), exist_ok=True)
-    
-    # Download models if needed
-    if not args.skip_download:
-        if not download_models(args.dummy_models, args.force_download):
-            logger.warning("Model download incomplete. Some features may not work.")
-            # Continue anyway with warning
-    
-    # Start the API server
-    api_process = start_api_server(args.api_port, args.debug, use_cpu)
-    if not api_process:
-        logger.error("Failed to start API server. Exiting.")
+    if api_port is None:
+        logger.error(f"Could not find a free port for API server starting from {args.api_port}")
         sys.exit(1)
-    
-    # Start the frontend server
-    frontend_process = start_frontend_server(args.frontend_port, args.no_browser)
-    if not frontend_process:
-        logger.error("Failed to start frontend server. Exiting.")
+    if frontend_port is None:
+        logger.error(f"Could not find a free port for frontend server starting from {args.frontend_port}")
         sys.exit(1)
+
+    # Check and install dependencies
+    check_dependencies()
     
-    # Open browser if requested
-    if not args.no_browser:
-        threading.Thread(target=open_browser, args=(args.frontend_port,), daemon=True).start()
+    # Download or create dummy models
+    download_models(args.dummy_models)
     
-    # Monitor server outputs
-    if not args.debug:  # Only monitor logs if not in debug mode
-        api_monitor = threading.Thread(target=log_monitor, args=(api_process, "API"), daemon=True)
-        frontend_monitor = threading.Thread(target=log_monitor, args=(frontend_process, "Frontend"), daemon=True)
-        api_monitor.start()
-        frontend_monitor.start()
+    # Start servers
+    api_process = start_api_server(api_port, args.cpu)
+    frontend_process = start_frontend_server(frontend_port)
     
-    logger.info(f"Real-Time Avatar System started")
-    logger.info(f"API server: http://localhost:{args.api_port}")
-    logger.info(f"Frontend: http://localhost:{args.frontend_port}")
+    # Log server URLs
+    logger.info("Real-Time Avatar System started")
+    logger.info(f"API server: http://localhost:{api_port}")
+    logger.info(f"Frontend: http://localhost:{frontend_port}")
     logger.info("Press Ctrl+C to stop")
     
-    # Keep the main thread alive
     try:
+        # Monitor processes
         while True:
-            # Check if any process has died
-            if api_process.poll() is not None:
-                logger.error("API server has stopped unexpectedly")
+            # Check API server
+            api_returncode = api_process.poll()
+            if api_returncode is not None:
+                logger.error(f"API server has stopped unexpectedly with return code {api_returncode}")
                 break
-                
-            if frontend_process.poll() is not None:
-                logger.error("Frontend server has stopped unexpectedly")
+            
+            # Check frontend server
+            frontend_returncode = frontend_process.poll()
+            if frontend_returncode is not None:
+                logger.error(f"Frontend server has stopped unexpectedly with return code {frontend_returncode}")
                 break
-                
+            
             time.sleep(1)
+            
     except KeyboardInterrupt:
-        logger.info("Shutting down avatar system...")
+        logger.info("Shutting down servers...")
     finally:
-        stop_all_processes()
+        # Terminate processes
+        for process in [api_process, frontend_process]:
+            if process.poll() is None:  # Process is still running
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+        
+        logger.info("Servers stopped")
 
 if __name__ == "__main__":
     main() 

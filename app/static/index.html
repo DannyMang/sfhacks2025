@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -217,10 +216,14 @@
     </footer>
 
     <script>
+        // Configuration
+        const API_PORT = 8000;
+        const FRAME_INTERVAL = 50; // 20 FPS (milliseconds between frames)
+        
         // DOM Elements
         const webcamVideo = document.getElementById('webcam');
         const avatarCanvas = document.getElementById('avatar-output');
-        const avatarCtx = avatarCanvas.getContext('2d');
+        const ctx = avatarCanvas.getContext('2d');
         
         const connectBtn = document.getElementById('connect-btn');
         const disconnectBtn = document.getElementById('disconnect-btn');
@@ -234,89 +237,130 @@
         const statusEl = document.getElementById('status');
         const statusLog = document.querySelector('.status');
         
+        // Initialize canvas
+        avatarCanvas.width = 512;
+        avatarCanvas.height = 512;
+        ctx.fillStyle = 'black';
+        ctx.fillRect(0, 0, avatarCanvas.width, avatarCanvas.height);
+        
         // Global variables
         let websocket = null;
         let mediaStream = null;
         let audioContext = null;
-        let audioSource = null;
-        let audioProcessor = null;
-        let videoInterval = null;
-        let lastFrameTime = 0;
+        let frameInterval = null;
         let framesReceived = 0;
-        let fpsCounter = 0;
+        let lastFrameTime = 0;
         let fpsInterval = null;
+        let pingInterval = null;
         
-        // Initialize canvas
-        avatarCanvas.width = 512;
-        avatarCanvas.height = 512;
-        avatarCtx.fillStyle = 'black';
-        avatarCtx.fillRect(0, 0, avatarCanvas.width, avatarCanvas.height);
-        
-        // Helper function to log messages
-        function logMessage(message) {
-            const log = document.createElement('p');
-            log.className = 'log';
-            log.textContent = message;
-            statusLog.appendChild(log);
-            statusLog.scrollTop = statusLog.scrollHeight;
+        // Add a log message to the status area
+        function addLog(message) {
+            const logEl = document.createElement('p');
+            logEl.className = 'log';
+            logEl.textContent = message;
+            statusLog.appendChild(logEl);
             
-            // Limit number of messages
-            if (statusLog.children.length > 20) {
-                statusLog.removeChild(statusLog.children[0]);
+            // Keep only the most recent logs
+            while (statusLog.children.length > 10) {
+                statusLog.removeChild(statusLog.firstChild);
             }
+            
+            // Scroll to bottom
+            statusLog.scrollTop = statusLog.scrollHeight;
         }
         
         // Connect to WebSocket server
         function connectWebSocket() {
+            if (websocket && websocket.readyState === WebSocket.OPEN) {
+                addLog("WebSocket already connected");
+                return;
+            }
+            
             const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             const wsHost = window.location.hostname;
-            const wsPort = 8000; // FastAPI server port
+            const wsPort = 8000; // The API server port
             const wsUrl = `${wsProtocol}//${wsHost}:${wsPort}/ws/avatar`;
             
-            logMessage(`Connecting to ${wsUrl}...`);
+            addLog(`Connecting to ${wsUrl}...`);
             
             try {
                 websocket = new WebSocket(wsUrl);
                 
-                websocket.onopen = function(event) {
-                    logMessage('WebSocket connection established');
+                websocket.onopen = () => {
+                    addLog("WebSocket connected");
+                    statusEl.textContent = "Connected";
                     connectBtn.disabled = true;
                     disconnectBtn.disabled = false;
-                    statusEl.textContent = 'Connected';
+                    
+                    // Start FPS counter
                     startFpsCounter();
+                    
+                    // Start sending ping messages
+                    pingInterval = setInterval(() => {
+                        if (websocket.readyState === WebSocket.OPEN) {
+                            websocket.send(JSON.stringify({
+                                type: "ping",
+                                timestamp: Date.now()
+                            }));
+                        }
+                    }, 5000);
                 };
                 
-                websocket.onmessage = function(event) {
+                websocket.onmessage = (event) => {
                     const data = JSON.parse(event.data);
                     
-                    if (data.frame_data) {
-                        renderAvatarFrame(data.frame_data);
-                        updateMetrics(data);
+                    if (data.type === "video") {
+                        // Process received video frame
+                        renderAvatarFrame(data.data);
                         framesReceived++;
+                    } else if (data.type === "pong") {
+                        // Calculate latency from ping-pong
+                        const latency = (Date.now() - data.timestamp) / 2; // Round-trip time / 2
+                        latencyEl.textContent = `${latency.toFixed(0)} ms`;
+                    } else if (data.type === "error") {
+                        addLog(`Error: ${data.message}`);
                     }
                 };
                 
-                websocket.onerror = function(error) {
-                    logMessage(`WebSocket error: ${error}`);
-                    statusEl.textContent = 'Error';
+                websocket.onerror = (error) => {
+                    addLog("WebSocket error occurred");
+                    statusEl.textContent = "Error";
                 };
                 
-                websocket.onclose = function(event) {
-                    logMessage('WebSocket connection closed');
+                websocket.onclose = () => {
+                    addLog("WebSocket connection closed");
+                    statusEl.textContent = "Disconnected";
                     connectBtn.disabled = false;
                     disconnectBtn.disabled = true;
-                    statusEl.textContent = 'Disconnected';
+                    
+                    // Stop FPS counter
                     stopFpsCounter();
+                    
+                    // Clear ping interval
+                    if (pingInterval) {
+                        clearInterval(pingInterval);
+                        pingInterval = null;
+                    }
+                    
+                    websocket = null;
                 };
             } catch (error) {
-                logMessage(`Error connecting to WebSocket: ${error.message}`);
+                addLog(`Error connecting to WebSocket: ${error}`);
             }
         }
         
-        // Start webcam stream
+        // Disconnect WebSocket
+        function disconnectWebSocket() {
+            if (websocket) {
+                websocket.close();
+                addLog('WebSocket disconnected');
+            }
+        }
+        
+        // Start webcam
         async function startWebcam() {
             try {
-                mediaStream = await navigator.mediaDevices.getUserMedia({ 
+                const stream = await navigator.mediaDevices.getUserMedia({ 
                     video: { 
                         width: { ideal: 640 },
                         height: { ideal: 480 },
@@ -324,137 +368,106 @@
                     } 
                 });
                 
-                webcamVideo.srcObject = mediaStream;
+                mediaStream = stream;
+                webcamVideo.srcObject = stream;
                 startCamBtn.disabled = true;
                 stopCamBtn.disabled = false;
                 
                 // Start sending frames
                 startSendingFrames();
-                
-                logMessage('Webcam started');
+                addLog('Webcam started');
             } catch (error) {
-                logMessage(`Error accessing webcam: ${error.message}`);
+                addLog(`Error accessing webcam: ${error.message}`);
             }
         }
         
-        // Stop webcam stream
+        // Stop webcam
         function stopWebcam() {
             if (mediaStream) {
-                // Stop sending frames
                 stopSendingFrames();
-                
-                // Stop all tracks
                 mediaStream.getTracks().forEach(track => track.stop());
                 webcamVideo.srcObject = null;
                 mediaStream = null;
-                
                 startCamBtn.disabled = false;
                 stopCamBtn.disabled = true;
-                
-                logMessage('Webcam stopped');
+                addLog('Webcam stopped');
             }
         }
         
-        // Start audio processing
+        // Start audio
         async function startAudio() {
             try {
-                // Get audio stream
                 const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                
-                // Create audio context
                 audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const source = audioContext.createMediaStreamSource(audioStream);
                 
-                // Create source node
-                audioSource = audioContext.createMediaStreamSource(audioStream);
+                const processor = audioContext.createScriptProcessor(4096, 1, 1);
+                source.connect(processor);
+                processor.connect(audioContext.destination);
                 
-                // Create script processor for sampling audio
-                const bufferSize = 4096;
-                audioProcessor = audioContext.createScriptProcessor(bufferSize, 1, 1);
-                
-                // Connect nodes
-                audioSource.connect(audioProcessor);
-                audioProcessor.connect(audioContext.destination);
-                
-                // Process audio data
-                audioProcessor.onaudioprocess = function(event) {
+                processor.onaudioprocess = function(event) {
                     if (websocket && websocket.readyState === WebSocket.OPEN) {
-                        // Get audio data
                         const inputData = event.inputBuffer.getChannelData(0);
-                        
-                        // Send to server
                         const audio_data = btoa(String.fromCharCode.apply(null, new Uint8Array(inputData.buffer)));
                         
                         websocket.send(JSON.stringify({
-                            audio_data: audio_data,
-                            sample_rate: audioContext.sampleRate
+                            type: "audio",
+                            data: audio_data
                         }));
                     }
                 };
                 
                 startAudioBtn.disabled = true;
                 stopAudioBtn.disabled = false;
-                
-                logMessage('Audio started');
+                addLog('Audio started');
             } catch (error) {
-                logMessage(`Error accessing microphone: ${error.message}`);
+                addLog(`Error accessing microphone: ${error.message}`);
             }
         }
         
-        // Stop audio processing
+        // Stop audio
         function stopAudio() {
             if (audioContext) {
-                if (audioProcessor) {
-                    audioProcessor.disconnect();
-                    audioProcessor = null;
-                }
-                
-                if (audioSource) {
-                    audioSource.disconnect();
-                    audioSource = null;
-                }
-                
                 audioContext.close();
                 audioContext = null;
-                
                 startAudioBtn.disabled = false;
                 stopAudioBtn.disabled = true;
-                
-                logMessage('Audio stopped');
+                addLog('Audio stopped');
             }
         }
         
-        // Start sending frames to server
+        // Start sending frames
         function startSendingFrames() {
-            if (videoInterval) return;
+            if (frameInterval) return;
             
-            videoInterval = setInterval(() => {
-                if (websocket && websocket.readyState === WebSocket.OPEN && mediaStream) {
-                    // Create offscreen canvas to get webcam frame
+            frameInterval = setInterval(() => {
+                if (websocket && 
+                    websocket.readyState === WebSocket.OPEN && 
+                    mediaStream &&
+                    webcamVideo.videoWidth > 0) {
+                    
                     const canvas = document.createElement('canvas');
                     canvas.width = webcamVideo.videoWidth;
                     canvas.height = webcamVideo.videoHeight;
                     const ctx = canvas.getContext('2d');
                     
-                    // Draw video frame to canvas
                     ctx.drawImage(webcamVideo, 0, 0);
-                    
-                    // Convert to base64
                     const imageData = canvas.toDataURL('image/jpeg', 0.8).split(',')[1];
                     
-                    // Send to server
                     websocket.send(JSON.stringify({
-                        frame_data: imageData,
+                        type: "video",
+                        data: imageData,
                         timestamp: Date.now()
                     }));
                 }
-            }, 33); // ~30 FPS (1000/30)
+            }, FRAME_INTERVAL);
         }
         
         // Stop sending frames
         function stopSendingFrames() {
-            if (videoInterval) {
-                clearInterval(videoInterval);
-                videoInterval = null;
+            if (frameInterval) {
+                clearInterval(frameInterval);
+                frameInterval = null;
             }
         }
         
@@ -462,16 +475,9 @@
         function renderAvatarFrame(base64Data) {
             const img = new Image();
             img.onload = function() {
-                avatarCtx.drawImage(img, 0, 0, avatarCanvas.width, avatarCanvas.height);
+                ctx.drawImage(img, 0, 0, avatarCanvas.width, avatarCanvas.height);
             };
             img.src = 'data:image/jpeg;base64,' + base64Data;
-        }
-        
-        // Update metrics
-        function updateMetrics(data) {
-            if (data.latency) {
-                latencyEl.textContent = `${(data.latency * 1000).toFixed(1)} ms`;
-            }
         }
         
         // FPS counter
@@ -479,12 +485,11 @@
             if (fpsInterval) return;
             
             fpsInterval = setInterval(() => {
-                fpsEl.textContent = `${framesReceived}`;
+                fpsEl.textContent = framesReceived;
                 framesReceived = 0;
             }, 1000);
         }
         
-        // Stop FPS counter
         function stopFpsCounter() {
             if (fpsInterval) {
                 clearInterval(fpsInterval);
@@ -493,31 +498,7 @@
             }
         }
         
-        // Disconnect WebSocket
-        function disconnectWebSocket() {
-            if (websocket) {
-                websocket.close();
-                websocket = null;
-                
-                // Reset UI
-                connectBtn.disabled = false;
-                disconnectBtn.disabled = true;
-                
-                // Stop sending frames
-                stopSendingFrames();
-                
-                logMessage('WebSocket disconnected');
-            }
-        }
-        
-        // Clean up on page unload
-        window.addEventListener('beforeunload', () => {
-            stopWebcam();
-            stopAudio();
-            disconnectWebSocket();
-        });
-        
-        // Button event listeners
+        // Event listeners
         connectBtn.addEventListener('click', connectWebSocket);
         disconnectBtn.addEventListener('click', disconnectWebSocket);
         startCamBtn.addEventListener('click', startWebcam);
@@ -527,3 +508,4 @@
     </script>
 </body>
 </html>
+        

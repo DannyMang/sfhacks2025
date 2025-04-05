@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Real-Time Avatar System</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f0f0f0;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+        }
+        .video-container {
+            display: flex;
+            justify-content: space-between;
+            margin: 20px 0;
+        }
+        .video-box {
+            width: 48%;
+            background-color: #000;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+        video, canvas {
+            width: 100%;
+            height: auto;
+        }
+        .controls {
+            display: flex;
+            justify-content: center;
+            gap: 10px;
+            margin: 20px 0;
+        }
+        button {
+            padding: 10px 20px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        .status {
+            text-align: center;
+            margin: 10px 0;
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Real-Time Avatar System</h1>
+        <div class="video-container">
+            <div class="video-box">
+                <video id="webcam" autoplay playsinline></video>
+            </div>
+            <div class="video-box">
+                <canvas id="avatar"></canvas>
+            </div>
+        </div>
+        <div class="controls">
+            <button id="startBtn">Start Webcam</button>
+            <button id="stopBtn" disabled>Stop Webcam</button>
+        </div>
+        <div class="status" id="status">Ready to start</div>
+    </div>
+
+    <script>
+        const webcam = document.getElementById('webcam');
+        const avatar = document.getElementById('avatar');
+        const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const status = document.getElementById('status');
+        const ctx = avatar.getContext('2d');
+        
+        let ws = null;
+        let stream = null;
+        let isRunning = false;
+
+        // Set canvas size
+        avatar.width = 640;
+        avatar.height = 480;
+
+        // WebSocket connection
+        function connectWebSocket() {
+            ws = new WebSocket('ws://localhost:8000/ws/avatar');
+            
+            ws.onopen = () => {
+                status.textContent = 'Connected to server';
+                startBtn.disabled = false;
+            };
+            
+            ws.onclose = () => {
+                status.textContent = 'Disconnected from server';
+                startBtn.disabled = true;
+                stopBtn.disabled = true;
+                if (stream) {
+                    stream.getTracks().forEach(track => track.stop());
+                }
+            };
+            
+            ws.onmessage = (event) => {
+                const img = new Image();
+                img.onload = () => {
+                    ctx.drawImage(img, 0, 0, avatar.width, avatar.height);
+                };
+                img.src = 'data:image/jpeg;base64,' + event.data;
+            };
+            
+            ws.onerror = (error) => {
+                status.textContent = 'WebSocket error: ' + error.message;
+            };
+        }
+
+        // Start webcam
+        startBtn.onclick = async () => {
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+                webcam.srcObject = stream;
+                isRunning = true;
+                startBtn.disabled = true;
+                stopBtn.disabled = false;
+                status.textContent = 'Webcam started';
+                
+                // Start sending frames
+                const sendFrame = () => {
+                    if (!isRunning) return;
+                    
+                    const canvas = document.createElement('canvas');
+                    canvas.width = webcam.videoWidth;
+                    canvas.height = webcam.videoHeight;
+                    const context = canvas.getContext('2d');
+                    context.drawImage(webcam, 0, 0);
+                    
+                    const frame = canvas.toDataURL('image/jpeg').split(',')[1];
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        ws.send(frame);
+                    }
+                    
+                    requestAnimationFrame(sendFrame);
+                };
+                
+                sendFrame();
+            } catch (error) {
+                status.textContent = 'Error accessing webcam: ' + error.message;
+            }
+        };
+
+        // Stop webcam
+        stopBtn.onclick = () => {
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+                stream = null;
+            }
+            isRunning = false;
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+            status.textContent = 'Webcam stopped';
+        };
+
+        // Connect to WebSocket server
+        connectWebSocket();
+    </script>
+</body>
+</html> 

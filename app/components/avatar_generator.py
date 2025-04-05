@@ -12,6 +12,8 @@ import torch.nn as nn
 from torch.nn import functional as F
 import cv2
 from PIL import Image
+import logging
+import traceback
 
 class AvatarGenerator:
     def __init__(self, model_path, device='cuda'):
@@ -22,10 +24,11 @@ class AvatarGenerator:
             model_path: Path to the StyleGAN3 model checkpoint
             device: Device to run inference on ('cuda' or 'cpu')
         """
+        self.logger = logging.getLogger(__name__)
         self.model_path = model_path
         # Check if CUDA is available and adjust device accordingly
         if device == 'cuda' and not torch.cuda.is_available():
-            print("CUDA not available, falling back to CPU")
+            self.logger.warning("CUDA not available, falling back to CPU")
             device = 'cpu'
         self.device = device
         self.model = None
@@ -45,66 +48,45 @@ class AvatarGenerator:
         
     def load_model(self):
         """Load the StyleGAN3 model."""
-        print(f"Loading StyleGAN3 model from {self.model_path}")
+        self.logger.info(f"Loading StyleGAN3 model from {self.model_path}")
         
-        # For this hackathon implementation, we'll just create a dummy model
-        # to simulate the StyleGAN3 behavior for now
-        class DummyStyleGAN3(nn.Module):
-            def __init__(self, z_dim=512, w_dim=512, img_resolution=512):
-                super().__init__()
-                self.z_dim = z_dim
-                self.w_dim = w_dim
-                self.img_resolution = img_resolution
-                self.mapping = nn.Sequential(
-                    nn.Linear(z_dim, w_dim),
-                    nn.LeakyReLU(0.2),
-                    nn.Linear(w_dim, w_dim),
-                )
-                # Simple dummy synthesis network
-                self.synthesis = nn.Sequential(
-                    nn.ConvTranspose2d(w_dim, 512, 4, 1, 0),
-                    nn.LeakyReLU(0.2),
-                    nn.ConvTranspose2d(512, 256, 4, 2, 1),
-                    nn.LeakyReLU(0.2),
-                    nn.ConvTranspose2d(256, 128, 4, 2, 1),
-                    nn.LeakyReLU(0.2),
-                    nn.ConvTranspose2d(128, 64, 4, 2, 1),
-                    nn.LeakyReLU(0.2),
-                    nn.ConvTranspose2d(64, 32, 4, 2, 1),
-                    nn.LeakyReLU(0.2),
-                    nn.ConvTranspose2d(32, 3, 4, 2, 1),
-                    nn.Tanh(),
-                )
+        try:
+            # Log file details
+            if os.path.exists(self.model_path):
+                size_mb = os.path.getsize(self.model_path) / (1024 * 1024)
+                self.logger.info(f"Found model file: {self.model_path} (size: {size_mb:.2f} MB)")
+            else:
+                self.logger.error(f"Model file not found: {self.model_path}")
+                raise FileNotFoundError(f"Model file not found: {self.model_path}")
             
-            def mapping_network(self, z):
-                return self.mapping(z)
+            # Try to load the model
+            self.logger.debug("Attempting to load model checkpoint...")
+            checkpoint = torch.load(self.model_path, map_location=self.device)
+            self.logger.debug(f"Checkpoint type: {type(checkpoint)}")
             
-            def synthesis_network(self, w):
-                w_reshaped = w.view(-1, self.w_dim, 1, 1)
-                return self.synthesis(w_reshaped)
+            if isinstance(checkpoint, dict):
+                self.logger.debug(f"Checkpoint keys: {checkpoint.keys()}")
+                self.model = checkpoint['model'] if 'model' in checkpoint else checkpoint
+            else:
+                self.model = checkpoint
             
-            def forward(self, z, c=None, truncation_psi=0.7, noise_mode='const'):
-                w = self.mapping_network(z)
-                img = self.synthesis_network(w)
-                return img
-        
-        # Check if the model file exists, but proceed with dummy model for hackathon
-        if os.path.exists(self.model_path):
-            try:
-                # Attempt to load the model, but skip if it fails
-                # In a real implementation, you would use the actual StyleGAN3 code
-                # self.model = torch.load(self.model_path, map_location=self.device)
-                print("Model file exists, but using dummy model for development")
-            except Exception as e:
-                print(f"Error loading model: {e}")
-                print("Falling back to dummy model")
-        
-        # Create a dummy model
-        self.model = DummyStyleGAN3(self.z_dim, self.w_dim, self.img_resolution).to(self.device)
-        print("Initialized dummy StyleGAN3 model for development")
-        
-        # Generate a random base identity (in real implementation, you'd load a specific one)
-        self.generate_base_identity()
+            self.logger.debug(f"Model type: {type(self.model)}")
+            self.model.eval()
+            self.model.to(self.device)
+            
+            # Log model details
+            total_params = sum(p.numel() for p in self.model.parameters())
+            self.logger.info(f"Model loaded successfully. Total parameters: {total_params:,}")
+            
+            # Generate base identity
+            self.generate_base_identity()
+            
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Failed to load StyleGAN3 model: {str(e)}")
+            self.logger.error(traceback.format_exc())
+            raise
     
     def generate_base_identity(self):
         """Generate a base identity for the avatar."""
@@ -122,12 +104,12 @@ class AvatarGenerator:
                 # Simplified fallback
                 self.base_w = z  # Just use Z as W for the dummy implementation
         
-        print("Generated base identity")
+        self.logger.info("Generated base identity")
     
     def optimize_for_inference(self):
         """Optimize the model for inference using TensorRT or other methods."""
         # This is a placeholder for real optimization that would happen in production
-        print("Optimizing model for inference...")
+        self.logger.info("Optimizing model for inference...")
         
         # In reality, you would:
         # 1. Quantize the model to FP16 or INT8
@@ -146,11 +128,11 @@ class AvatarGenerator:
                 # Note: This is a simplified version. In reality, tracing StyleGAN3
                 # would be more complex due to its dynamic nature
                 self.model = torch.jit.script(self.model)
-                print("Model optimized with torch.jit.script")
+                self.logger.info("Model optimized with torch.jit.script")
             except Exception as e:
-                print(f"Warning: Failed to optimize model: {e}")
+                self.logger.warning(f"Failed to optimize model: {e}")
         else:
-            print("CUDA not available or not using CUDA, skipping optimization")
+            self.logger.info("CUDA not available or not using CUDA, skipping optimization")
     
     def generate_frame(self, head_pose, expressions=None, truncation_psi=0.7):
         """
@@ -248,8 +230,7 @@ class AvatarGenerator:
         
         # Simple linear interpolation for hackathon
         # In production, you'd use optical flow based methods like RIFE
-        interpolated = cv2.addWeighted(prev_frame, 1.0 - factor, current_frame, factor, 0)
-        return interpolated
+        return cv2.addWeighted(prev_frame, 1-factor, current_frame, factor, 0)
     
     def export_onnx(self, onnx_path):
         """
