@@ -42,11 +42,14 @@ def setup_logging():
     logging.info("Logging system initialized")
     logging.info(f"Log file: {log_file}")
     logging.info(f"Python version: {sys.version}")
-    if os.name == 'posix':
-        try:
-            import resource
-            logging.info(f"Memory limit: {resource.getrlimit(resource.RLIMIT_AS)}")
-        except:
-            pass
+    
+    # Log CUDA information if available
+    try:
+        import torch
+        logging.info(f"CUDA available: {torch.cuda.is_available()}")
+        if torch.cuda.is_available():
+            logging.info(f"CUDA device: {torch.cuda.get_device_name()}")
+    except ImportError:
+        logging.info("PyTorch not available")
     
     return log_file 

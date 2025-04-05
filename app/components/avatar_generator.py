@@ -14,6 +14,7 @@ import cv2
 from PIL import Image
 import logging
 import traceback
+import pickle
 
 class AvatarGenerator:
     def __init__(self, model_path, device='cuda'):
@@ -51,6 +52,16 @@ class AvatarGenerator:
         self.logger.info(f"Loading StyleGAN3 model from {self.model_path}")
         
         try:
+            # Add StyleGAN3 repo to path
+            import sys
+            stylegan3_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'stylegan3')
+            if stylegan3_path not in sys.path:
+                sys.path.append(stylegan3_path)
+            
+            # Now try to import the required modules
+            import torch_utils  # This should work now
+            import dnnlib
+            
             # Log file details
             if os.path.exists(self.model_path):
                 size_mb = os.path.getsize(self.model_path) / (1024 * 1024)
@@ -59,28 +70,18 @@ class AvatarGenerator:
                 self.logger.error(f"Model file not found: {self.model_path}")
                 raise FileNotFoundError(f"Model file not found: {self.model_path}")
             
-            # Try to load the model
-            self.logger.debug("Attempting to load model checkpoint...")
-            checkpoint = torch.load(self.model_path, map_location=self.device)
-            self.logger.debug(f"Checkpoint type: {type(checkpoint)}")
-            
-            if isinstance(checkpoint, dict):
-                self.logger.debug(f"Checkpoint keys: {checkpoint.keys()}")
-                self.model = checkpoint['model'] if 'model' in checkpoint else checkpoint
-            else:
-                self.model = checkpoint
+            # Load pickle file with custom unpickler
+            self.logger.debug("Attempting to load pickle model...")
+            with dnnlib.util.open_url(self.model_path) as f:
+                self.model = pickle.load(f)
             
             self.logger.debug(f"Model type: {type(self.model)}")
-            self.model.eval()
-            self.model.to(self.device)
             
-            # Log model details
-            total_params = sum(p.numel() for p in self.model.parameters())
-            self.logger.info(f"Model loaded successfully. Total parameters: {total_params:,}")
+            # Move to device if it's a torch model
+            if hasattr(self.model, 'to'):
+                self.model.to(self.device)
             
-            # Generate base identity
-            self.generate_base_identity()
-            
+            self.logger.info("Model loaded successfully")
             return True
             
         except Exception as e:

@@ -7,35 +7,16 @@ import os
 import sys
 import urllib.request
 import urllib.error
-import zipfile
-import tarfile
-import hashlib
 import time
 from tqdm import tqdm
 import argparse
-
-# Try to import gdown, install if not available
-try:
-    import gdown
-except ImportError:
-    print("Installing gdown package...")
-    import subprocess
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "gdown"])
-    import gdown
 
 # Create models directory if it doesn't exist
 MODELS_DIR = os.path.join('app', 'models')
 os.makedirs(MODELS_DIR, exist_ok=True)
 
-# Define models to download
+# Define models to download (removed StyleGAN3 since you have it locally)
 MODELS = [
-    {
-        'name': 'stylegan3_t.pt',
-        'url': 'https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan3/versions/1/files/stylegan3-t-ffhq-1024x1024.pkl',
-        'file_path': os.path.join(MODELS_DIR, 'stylegan3_t.pt'),
-        'description': 'StyleGAN3-T trained on FFHQ dataset (1024x1024)',
-        'fallback_gdrive_id': '1Dh2eN5VVEgxJxbA-cVqYqrwITksPLJon'
-    },
     {
         'name': 'wav2lip.pth',
         'url': 'https://github.com/Rudrabha/Wav2Lip/releases/download/weights/wav2lip.pth',
@@ -68,49 +49,15 @@ def download_url(url, output_path, description, timeout=30, max_retries=3):
                 urllib.request.install_opener(opener)
                 urllib.request.urlretrieve(url, filename=output_path, 
                                         reporthook=t.update_to)
-            
-            # Verify file exists and has size
-            if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                return True
-            else:
-                print(f"Downloaded file is empty or doesn't exist.")
-                
-        except (urllib.error.URLError, urllib.error.HTTPError, ConnectionResetError, TimeoutError) as e:
+            return True
+        except Exception as e:
             if attempt < max_retries - 1:
-                wait_time = 2 ** attempt  # Exponential backoff
+                wait_time = 2 ** attempt
                 print(f"Download attempt {attempt+1} failed: {e}. Retrying in {wait_time} seconds...")
                 time.sleep(wait_time)
             else:
                 print(f"Failed to download after {max_retries} attempts: {e}")
                 return False
-        except Exception as e:
-            print(f"Unexpected error during download: {str(e)}")
-            return False
-    
-    return False
-
-def download_gdrive(gdrive_id, output_path, description, max_retries=3):
-    """Download a file from Google Drive with retry logic."""
-    for attempt in range(max_retries):
-        try:
-            print(f"Downloading {description}...")
-            gdown.download(id=gdrive_id, output=output_path, quiet=False)
-            
-            # Verify file exists and has size
-            if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                return True
-            else:
-                print(f"Downloaded file is empty or doesn't exist.")
-                
-        except Exception as e:
-            if attempt < max_retries - 1:
-                wait_time = 2 ** attempt  # Exponential backoff
-                print(f"Download attempt {attempt+1} failed: {e}. Retrying in {wait_time} seconds...")
-                time.sleep(wait_time)
-            else:
-                print(f"Failed to download from Google Drive after {max_retries} attempts: {e}")
-                return False
-    
     return False
 
 def create_dummy_model(file_path, size_kb=10):
@@ -143,16 +90,7 @@ def main():
         if 'url' in model:
             download_success = download_url(model['url'], model['file_path'], model['description'])
         
-        # Try Google Drive fallback if URL failed
-        if not download_success and 'fallback_gdrive_id' in model:
-            print(f"Direct download failed, trying Google Drive fallback...")
-            download_success = download_gdrive(model['fallback_gdrive_id'], model['file_path'], model['description'])
-        
-        # Try primary Google Drive if specified
-        if not download_success and 'gdrive_id' in model and not 'fallback_gdrive_id' in model:
-            download_success = download_gdrive(model['gdrive_id'], model['file_path'], model['description'])
-        
-        # Create dummy if all methods failed and --dummy flag is set
+        # Create dummy if download failed and --dummy flag is set
         if not download_success and args.dummy:
             download_success = create_dummy_model(model['file_path'])
         
