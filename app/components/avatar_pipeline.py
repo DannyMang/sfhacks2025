@@ -80,11 +80,24 @@ class AvatarPipeline:
                 self.logger.info("Avatar generator initialized")
             except Exception as e:
                 self.logger.error(f"Avatar generator failed: {e}")
+                self.logger.error(traceback.format_exc())
                 self.avatar_generator = None
             
-            # Skip Voice2Face for CPU mode
-            self.voice2face = None
-            self.logger.info("Voice2Face skipped (CPU mode)")
+            # Initialize Voice2Face if we're using CUDA
+            if self.device == 'cuda' and torch.cuda.is_available() and 'wav2lip' in self.model_paths:
+                try:
+                    self.voice2face = Voice2Face(
+                        model_path=self.model_paths['wav2lip'],
+                        device=self.device
+                    )
+                    self.logger.info("Voice2Face initialized")
+                except Exception as e:
+                    self.logger.error(f"Voice2Face failed: {e}")
+                    self.logger.error(traceback.format_exc())
+                    self.voice2face = None
+            else:
+                self.voice2face = None
+                self.logger.info("Voice2Face skipped (CPU mode or model not available)")
             
             # Check if we have minimum required components
             if not self.face_detector or not self.avatar_generator:
@@ -94,6 +107,7 @@ class AvatarPipeline:
             
         except Exception as e:
             self.logger.error(f"Pipeline initialization failed: {e}")
+            self.logger.error(traceback.format_exc())
             raise
     
     def start(self):
@@ -141,6 +155,7 @@ class AvatarPipeline:
                 
             except Exception as e:
                 self.logger.error(f"Error decoding frame: {e}")
+                self.logger.error(traceback.format_exc())
                 return None
             
             # Detect face landmarks
@@ -173,6 +188,7 @@ class AvatarPipeline:
                 return f"data:image/jpeg;base64,{encoded_frame}"
             except Exception as e:
                 self.logger.error(f"Error encoding frame: {e}")
+                self.logger.error(traceback.format_exc())
                 return None
             
         except Exception as e:
@@ -190,6 +206,7 @@ class AvatarPipeline:
                 await self.voice2face.process_audio(audio_data)
         except Exception as e:
             self.logger.error(f"Error processing audio: {e}")
+            self.logger.error(traceback.format_exc())
 
     def get_result(self, timeout=0.1):
         """Get the latest processed frame."""

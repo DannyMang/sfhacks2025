@@ -52,56 +52,87 @@ def check_dependencies():
         logger.info(f"Some packages missing: {e}")
     
     try:
-        # Try to install from requirements-macos.txt first
+        # Try to install from requirements.txt first (for Windows with CUDA)
         subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-r", "requirements-macos.txt"],
+            [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
             check=True
         )
-        logger.info("Dependencies installed from requirements-macos.txt")
+        logger.info("Dependencies installed from requirements.txt")
     except subprocess.CalledProcessError:
         try:
-            # Fall back to requirements.txt if macos version fails
+            # Fall back to requirements-macos.txt if main version fails
             subprocess.run(
-                [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
+                [sys.executable, "-m", "pip", "install", "-r", "requirements-macos.txt"],
                 check=True
             )
-            logger.info("Dependencies installed from requirements.txt")
+            logger.info("Dependencies installed from requirements-macos.txt")
         except subprocess.CalledProcessError as e:
             logger.error(f"Failed to install dependencies: {e}")
             sys.exit(1)
 
 def download_models(use_dummy: bool = False):
     """Download pre-trained models or use dummy models."""
-    logger.info("Downloading pre-trained models...")
+    logger.info("Checking for pre-trained models...")
+    
+    # Define model paths to check
+    model_paths = [
+        "app/models/StyleGAN3_FFHQ_1024x1024.pkl",
+        "app/models/stylegan3-t-ffhqu-1024x1024.pkl",
+        "app/models/wav2lip.pth"
+    ]
+    
+    # Check for user-provided models in absolute paths
+    user_paths = [
+        "C:/Users/danie/Desktop/projects/sfhacks2025/app/models/stylegan3-t-ffhqu-1024x1024.pkl",
+        "C:/Users/danie/Desktop/projects/sfhacks2025/app/models/wav2lip.pth"
+    ]
+    
+    # Create models directory if it doesn't exist
+    model_dir = "app/models"
+    os.makedirs(model_dir, exist_ok=True)
+    
+    # Check if models already exist
+    stylegan_exists = any(os.path.exists(path) for path in model_paths[:2] + [user_paths[0]])
+    wav2lip_exists = any(os.path.exists(path) for path in [model_paths[2], user_paths[1]])
+    
+    if stylegan_exists and wav2lip_exists:
+        logger.info("All required models already exist, skipping download")
+        return
+    
+    # If models don't exist, download them or create dummy files
     try:
         if use_dummy:
             logger.info("Using dummy model files for development")
             # Create dummy model files if they don't exist
-            model_dir = "app/models"
-            os.makedirs(model_dir, exist_ok=True)
-            dummy_files = ["stylegan3_t.pt", "wav2lip.pth", "first_order_model.pth"]
-            for file in dummy_files:
-                file_path = os.path.join(model_dir, file)
-                if not os.path.exists(file_path):
-                    with open(file_path, "w") as f:
-                        f.write("Dummy model file for development")
+            if not stylegan_exists:
+                with open(model_paths[0], 'wb') as f:
+                    f.write(b'\0' * 1024 * 1024)  # 1MB dummy file
+                logger.info(f"Created dummy StyleGAN model at {model_paths[0]}")
+            
+            if not wav2lip_exists:
+                with open(model_paths[2], 'wb') as f:
+                    f.write(b'\0' * 1024 * 1024)  # 1MB dummy file
+                logger.info(f"Created dummy Wav2Lip model at {model_paths[2]}")
         else:
-            subprocess.run([sys.executable, "download_models.py"], check=True)
-        logger.info("Models downloaded successfully")
-    except subprocess.CalledProcessError as e:
+            # Download models using the download_models.py script
+            cmd = [sys.executable, "download_models.py"]
+            if use_dummy:
+                cmd.append("--dummy")
+            
+            logger.info(f"Running: {' '.join(cmd)}")
+            subprocess.run(cmd, check=True)
+    except Exception as e:
         logger.error(f"Failed to download models: {e}")
         sys.exit(1)
 
-def start_api_server(port: int = 8000, use_cpu: bool = False) -> subprocess.Popen:
-    """Start the FastAPI backend server."""
+def start_api_server(port: int, cpu_mode: bool = False) -> subprocess.Popen:
+    """Start the API server."""
     logger.info(f"Starting API server on port {port}...")
-    if use_cpu:
-        logger.info("Running in CPU-only mode")
-        cmd = [sys.executable, "app/api/server.py", "--port", str(port), "--cpu"]
-    else:
-        cmd = [sys.executable, "app/api/server.py", "--port", str(port)]
-    
     try:
+        cmd = [sys.executable, "-m", "app.api.server", "--port", str(port)]
+        if cpu_mode:
+            cmd.append("--cpu")
+        
         process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -116,8 +147,8 @@ def start_api_server(port: int = 8000, use_cpu: bool = False) -> subprocess.Pope
         logger.error(f"Failed to start API server: {e}")
         sys.exit(1)
 
-def start_frontend_server(port: int = 8080) -> subprocess.Popen:
-    """Start the frontend web server."""
+def start_frontend_server(port: int) -> subprocess.Popen:
+    """Start the frontend server."""
     logger.info(f"Starting frontend server on port {port}...")
     try:
         process = subprocess.Popen(
@@ -141,6 +172,7 @@ def main():
     parser.add_argument("--dummy-models", action="store_true", help="Use dummy models for development")
     parser.add_argument("--api-port", type=int, default=8000, help="Port for the API server")
     parser.add_argument("--frontend-port", type=int, default=8080, help="Port for the frontend server")
+    parser.add_argument("--skip-download", action="store_true", help="Skip model download check")
     args = parser.parse_args()
 
     # Find free ports if the specified ones are in use
@@ -157,8 +189,11 @@ def main():
     # Check and install dependencies
     check_dependencies()
     
-    # Download or create dummy models
-    download_models(args.dummy_models)
+    # Download or create dummy models if needed
+    if not args.skip_download:
+        download_models(args.dummy_models)
+    else:
+        logger.info("Skipping model download check")
     
     # Start servers
     api_process = start_api_server(api_port, args.cpu)

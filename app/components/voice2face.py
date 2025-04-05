@@ -11,6 +11,9 @@ import torch
 import torch.nn as nn
 import cv2
 import librosa
+import logging
+import asyncio
+import traceback
 
 class Voice2Face:
     def __init__(self, model_path, device='cuda'):
@@ -21,9 +24,12 @@ class Voice2Face:
             model_path: Path to the Wav2Lip model checkpoint
             device: Device to run inference on ('cuda' or 'cpu')
         """
+        self.logger = logging.getLogger(__name__)
         self.model_path = model_path
         self.device = device
         self.model = None
+        self.use_tensorrt = False
+        self.tensorrt_model_path = None
         
         # Audio processing parameters
         self.sample_rate = 16000
@@ -38,75 +44,128 @@ class Voice2Face:
         # For performance tracking
         self.inference_time = 0
         
+        # Check for TensorRT model
+        if device == 'cuda' and torch.cuda.is_available():
+            model_dir = os.path.dirname(os.path.abspath(model_path))
+            tensorrt_path = os.path.join(model_dir, 'wav2lip_tensorrt.engine')
+            if os.path.exists(tensorrt_path):
+                self.tensorrt_model_path = tensorrt_path
+                self.logger.info(f"Found TensorRT model at {tensorrt_path}")
+                self.use_tensorrt = True
+        
         # Load model
         self.load_model()
+        
+        # Optimize for inference if using CUDA
+        if device == 'cuda' and torch.cuda.is_available() and self.model is not None:
+            self.optimize_for_inference()
     
     def load_model(self):
         """Load the Wav2Lip model."""
-        print(f"Loading Wav2Lip model from {self.model_path}")
+        self.logger.info(f"Loading Wav2Lip model from {self.model_path}")
         
         if not os.path.exists(self.model_path):
             raise FileNotFoundError(f"Model file not found: {self.model_path}")
         
         try:
-            # In a real implementation, you'd load the actual Wav2Lip model
-            # For this hackathon version, we'll use a dummy model
-            class DummyWav2Lip(nn.Module):
-                def __init__(self):
-                    super().__init__()
-                    # Simple mel spectrogram to lip keypoints mapping
-                    self.audio_encoder = nn.Sequential(
-                        nn.Conv1d(80, 64, kernel_size=3, padding=1),
-                        nn.ReLU(),
-                        nn.Conv1d(64, 32, kernel_size=3, padding=1),
-                        nn.ReLU(),
-                        nn.Conv1d(32, 16, kernel_size=3, padding=1),
-                        nn.ReLU(),
-                        nn.AdaptiveAvgPool1d(1)
-                    )
-                    
-                    self.lip_predictor = nn.Sequential(
-                        nn.Linear(16, 32),
-                        nn.ReLU(),
-                        nn.Linear(32, 20)  # 10 keypoints (x,y)
-                    )
-                
-                def forward(self, mel_spectrogram):
-                    # Reshape and process
-                    x = self.audio_encoder(mel_spectrogram)
-                    x = x.view(x.size(0), -1)
-                    lip_keypoints = self.lip_predictor(x)
-                    return lip_keypoints
-            
-            self.model = DummyWav2Lip().to(self.device)
-            if self.model_path.endswith('.pth'):
-                # Pretend to load weights
-                print("Initialized dummy Wav2Lip model for development")
+            if self.use_tensorrt:
+                self._load_tensorrt_model()
             else:
-                raise ValueError("Unsupported model format")
+                self._load_wav2lip_model()
             
         except Exception as e:
-            print(f"Error loading model: {e}")
+            self.logger.error(f"Error loading model: {e}")
+            self.logger.error(traceback.format_exc())
             raise
+    
+    def _load_tensorrt_model(self):
+        """Load TensorRT optimized Wav2Lip model."""
+        try:
+            # Try to import TensorRT
+            import tensorrt as trt
+            from torch2trt import TRTModule
+            
+            # Load TensorRT model
+            self.model = TRTModule()
+            self.model.load_state_dict(torch.load(self.tensorrt_model_path))
+            self.logger.info("TensorRT Wav2Lip model loaded successfully")
+            
+        except ImportError as e:
+            self.logger.error(f"TensorRT import failed: {e}")
+            self.use_tensorrt = False
+            self._load_wav2lip_model()
+            
+        except Exception as e:
+            self.logger.error(f"Failed to load TensorRT model: {e}")
+            self.logger.error(traceback.format_exc())
+            self.use_tensorrt = False
+            self._load_wav2lip_model()
+    
+    def _load_wav2lip_model(self):
+        """Load original Wav2Lip model or dummy model for development."""
+        # In a real implementation, you'd load the actual Wav2Lip model
+        # For this hackathon version, we'll use a dummy model
+        class DummyWav2Lip(nn.Module):
+            def __init__(self):
+                super().__init__()
+                # Simple mel spectrogram to lip keypoints mapping
+                self.audio_encoder = nn.Sequential(
+                    nn.Conv1d(80, 64, kernel_size=3, padding=1),
+                    nn.ReLU(),
+                    nn.Conv1d(64, 32, kernel_size=3, padding=1),
+                    nn.ReLU(),
+                    nn.Conv1d(32, 16, kernel_size=3, padding=1),
+                    nn.ReLU(),
+                    nn.AdaptiveAvgPool1d(1)
+                )
+                
+                self.lip_predictor = nn.Sequential(
+                    nn.Linear(16, 32),
+                    nn.ReLU(),
+                    nn.Linear(32, 20)  # 10 keypoints (x,y)
+                )
+            
+            def forward(self, mel_spectrogram):
+                # Reshape and process
+                x = self.audio_encoder(mel_spectrogram)
+                x = x.view(x.size(0), -1)
+                lip_keypoints = self.lip_predictor(x)
+                return lip_keypoints
+        
+        self.model = DummyWav2Lip().to(self.device)
+        if self.model_path.endswith('.pth'):
+            # Pretend to load weights
+            self.logger.info("Initialized dummy Wav2Lip model for development")
+        else:
+            raise ValueError("Unsupported model format")
     
     def optimize_for_inference(self):
         """Optimize the model for inference."""
-        # This is a placeholder for real optimization that would happen in production
-        print("Optimizing Voice2Face model for inference...")
+        if self.use_tensorrt:
+            self.logger.info("Model already using TensorRT, skipping additional optimization")
+            return
+            
+        self.logger.info("Optimizing Voice2Face model for inference...")
         
         if self.device == 'cuda' and torch.cuda.is_available():
             # Freeze model parameters
             for param in self.model.parameters():
                 param.requires_grad = False
             
+            # Enable CUDA optimizations
+            torch.backends.cudnn.benchmark = True
+            if hasattr(torch.backends.cuda, 'matmul'):
+                torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            
             # Use torch.jit.script to optimize
             try:
                 self.model = torch.jit.script(self.model)
-                print("Model optimized with torch.jit.script")
+                self.logger.info("Model optimized with torch.jit.script")
             except Exception as e:
-                print(f"Warning: Failed to optimize model: {e}")
+                self.logger.warning(f"Warning: Failed to optimize model with JIT: {e}")
         else:
-            print("CUDA not available, skipping optimization")
+            self.logger.info("CUDA not available, skipping optimization")
     
     def _extract_mel_features(self, audio, sr=16000):
         """
@@ -150,7 +209,7 @@ class Voice2Face:
         
         Args:
             audio_chunk: New audio chunk as numpy array
-            sr: Sample rate of the audio chunk
+            sr: Sample rate
         """
         # Resample if needed
         if sr != self.sample_rate:
@@ -159,35 +218,52 @@ class Voice2Face:
         # Append to buffer
         self.audio_buffer = np.append(self.audio_buffer, audio_chunk)
         
-        # Keep only the most recent audio
-        buffer_size = int(self.buffer_duration * self.sample_rate)
-        if len(self.audio_buffer) > buffer_size:
-            self.audio_buffer = self.audio_buffer[-buffer_size:]
+        # Trim buffer to keep only the most recent audio
+        max_buffer_size = int(self.buffer_duration * self.sample_rate)
+        if len(self.audio_buffer) > max_buffer_size:
+            self.audio_buffer = self.audio_buffer[-max_buffer_size:]
     
-    def predict_lip_shapes(self, audio_chunk=None, sr=16000):
+    async def process_audio(self, audio_data):
         """
-        Predict lip shapes from audio.
+        Process audio data to extract lip movements.
         
         Args:
-            audio_chunk: New audio chunk (optional). If None, use the current buffer.
-            sr: Sample rate of the audio chunk
+            audio_data: Audio data as bytes
             
         Returns:
-            lip_keypoints: Predicted lip keypoints for animation
+            lip_keypoints: Predicted lip keypoints
+        """
+        try:
+            # Convert bytes to numpy array
+            audio_chunk = np.frombuffer(audio_data, dtype=np.float32)
+            
+            # Update audio buffer
+            self.update_audio_buffer(audio_chunk, self.sample_rate)
+            
+            # Extract mel features
+            mel_features = self._extract_mel_features(self.audio_buffer)
+            
+            # Predict lip keypoints
+            lip_keypoints = await self.predict_lip_keypoints(mel_features)
+            
+            return lip_keypoints
+            
+        except Exception as e:
+            self.logger.error(f"Error processing audio: {e}")
+            self.logger.error(traceback.format_exc())
+            return None
+    
+    async def predict_lip_keypoints(self, mel_features):
+        """
+        Predict lip keypoints from mel features.
+        
+        Args:
+            mel_features: Mel spectrogram features
+            
+        Returns:
+            lip_keypoints: Predicted lip keypoints
         """
         start_time = time.time()
-        
-        # Update buffer if new audio provided
-        if audio_chunk is not None:
-            self.update_audio_buffer(audio_chunk, sr)
-        
-        # Check if buffer is empty
-        if len(self.audio_buffer) == 0:
-            # Return neutral mouth shape
-            return np.zeros((10, 2))  # 10 keypoints with (x,y) coordinates
-        
-        # Extract mel features
-        mel_features = self._extract_mel_features(self.audio_buffer)
         
         # Convert to tensor
         mel_tensor = torch.FloatTensor(mel_features).unsqueeze(0).to(self.device)
@@ -200,6 +276,7 @@ class Voice2Face:
         lip_keypoints = lip_keypoints.cpu().numpy().reshape(-1, 2)
         
         self.inference_time = time.time() - start_time
+        self.logger.debug(f"Lip keypoint prediction time: {self.inference_time:.3f}s")
         
         return lip_keypoints
     

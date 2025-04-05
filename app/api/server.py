@@ -41,6 +41,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 logger.info(f"Logging initialized. Log file: {log_file}")
 
+# Set OpenMP environment variable to avoid conflicts
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
 # Initialize FastAPI app
 app = FastAPI(title="Avatar System API")
 
@@ -75,63 +78,73 @@ async def startup_event():
             device = 'cpu'
             logger.info("Using CPU for inference (forced)")
         else:
-            # Force CPU mode if CUDA is not available
+            # Check CUDA availability
             use_cuda = torch.cuda.is_available()
             device = 'cuda' if use_cuda else 'cpu'
             logger.info(f"Using {device.upper()} for inference")
             if use_cuda:
                 logger.info(f"CUDA device: {torch.cuda.get_device_name()}")
         
-        # Check if model files exist and log their sizes
+        # Import here to avoid circular imports
+        from app.components.avatar_pipeline import AvatarPipeline
+        
+        # Define model paths
         model_paths = {
-            'stylegan': 'app/models/StyleGAN3_FFHQ_1024x1024.pkl',
-            'wav2lip': 'app/models/wav2lip.pth'
+            'stylegan': os.path.abspath('app/models/stylegan3-t-ffhqu-1024x1024.pkl'),
+            'wav2lip': os.path.abspath('app/models/wav2lip.pth'),
         }
         
-        for key, path in model_paths.items():
-            if os.path.exists(path):
-                size_mb = os.path.getsize(path) / (1024 * 1024)
-                logger.info(f"Model {key} found at {path} (size: {size_mb:.2f} MB)")
-            else:
-                logger.warning(f"Model file not found: {path}")
+        # Log model paths
+        logger.info("Model paths:")
+        for model_name, model_path in model_paths.items():
+            exists = os.path.exists(model_path)
+            logger.info(f"{model_name}: {model_path} (exists: {exists})")
         
-        # Initialize pipeline with detailed logging
-        try:
-            from app.components.avatar_pipeline import AvatarPipeline
-            logger.info("Initializing AvatarPipeline...")
-            pipeline = AvatarPipeline(
-                model_paths=model_paths,
-                device=device
-            )
-            pipeline.start()
-            logger.info("Avatar pipeline started successfully")
-        except Exception as pipeline_error:
-            logger.error("Pipeline initialization failed!")
-            logger.error(traceback.format_exc())
-            raise
+        # Check if models exist
+        missing_models = [name for name, path in model_paths.items() if not os.path.exists(path)]
+        if missing_models:
+            logger.warning(f"Missing models: {missing_models}")
+            logger.warning("Using placeholder mode due to missing models")
+            return
+        
+        # Initialize pipeline
+        logger.info("Initializing avatar pipeline...")
+        pipeline = AvatarPipeline(model_paths, device=device)
+        
+        # Start pipeline
+        logger.info("Starting avatar pipeline...")
+        await pipeline.start()
+        
+        logger.info("Server initialization complete")
         
     except Exception as e:
-        logger.error(f"Error during startup: {str(e)}")
+        logger.error(f"Error during startup: {e}")
         logger.error(traceback.format_exc())
-        pipeline = None
 
 @app.on_event("shutdown")
 async def shutdown_event():
     global pipeline
+    logger.info("Shutting down server...")
     if pipeline:
-        pipeline.stop()
-        logger.info("Avatar pipeline stopped")
+        await pipeline.stop()
+    logger.info("Server shutdown complete")
 
 @app.get("/")
 async def root():
     """Root endpoint to check server status."""
-    status = {"status": "running", "pipeline": pipeline is not None}
+    status = {
+        "status": "running", 
+        "pipeline": pipeline is not None,
+        "cuda_available": torch.cuda.is_available(),
+        "device": pipeline.device if pipeline else "none"
+    }
     logger.info(f"Status check: {status}")
     return status
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     try:
+        logger.info("WebSocket connection attempt received")
         await websocket.accept()
         logger.info("WebSocket connection accepted")
         
@@ -141,18 +154,22 @@ async def websocket_endpoint(websocket: WebSocket):
                 "type": "error",
                 "message": "Avatar pipeline not initialized"
             })
+            await websocket.close()
             return
         
         logger.info("Starting WebSocket communication loop")
         while True:
             try:
                 message = await websocket.receive()
-                logger.debug(f"Received raw WebSocket message: {message}")
+                logger.debug(f"Received WebSocket message type: {message.get('type', 'unknown')}")
                 
                 if message["type"] == "websocket.receive":
                     if "text" in message:
                         data = json.loads(message["text"])
+                        logger.debug(f"Parsed message data: {list(data.keys())}")
+                        
                         frame_data = data.get("frame_data", "")
+                        audio_data = data.get("audio_data", "")
                         
                         if frame_data:
                             logger.debug("Processing video frame")
@@ -172,15 +189,33 @@ async def websocket_endpoint(websocket: WebSocket):
                                     "frame": placeholder
                                 })
                                 logger.debug("Sent placeholder frame")
-                        else:
-                            logger.debug("Empty frame data received")
-                            
+                        
+                        if audio_data:
+                            logger.debug("Processing audio data")
+                            # Convert base64 audio to bytes
+                            audio_bytes = base64.b64decode(audio_data.split(',')[1] if ',' in audio_data else audio_data)
+                            await pipeline.process_audio(audio_bytes)
+                            logger.debug("Audio processed")
+                    elif "bytes" in message:
+                        logger.debug("Received binary message")
+                        # Handle binary data if needed
+                        pass
+                    else:
+                        logger.warning(f"Unknown message format: {message}")
+                        
             except WebSocketDisconnect:
                 logger.info("Client disconnected")
                 break
             except Exception as e:
                 logger.error(f"Error processing WebSocket message: {e}")
                 logger.error(traceback.format_exc())
+                try:
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": str(e)
+                    })
+                except:
+                    logger.error("Failed to send error message to client")
                 continue
                 
     except Exception as e:
@@ -201,12 +236,13 @@ def create_placeholder_image():
     cv2.putText(img, "Avatar Placeholder", (100, 256), font, 1, (255, 255, 255), 2)
     
     _, buffer = cv2.imencode('.jpg', img)
-    return base64.b64encode(buffer).decode('utf-8')
+    return f"data:image/jpeg;base64,{base64.b64encode(buffer).decode('utf-8')}"
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Start the avatar system API server")
     parser.add_argument("--port", type=int, default=8000, help="Port to run the server on")
     parser.add_argument("--cpu", action="store_true", help="Force CPU mode even if CUDA is available")
+    parser.add_argument("--debug", action="store_true", help="Enable debug mode with more verbose logging")
     return parser.parse_args()
 
 if __name__ == "__main__":
@@ -216,9 +252,14 @@ if __name__ == "__main__":
     if args.cpu:
         os.environ["FORCE_CPU"] = "1"
     
+    # Set debug level
+    if args.debug:
+        logging.getLogger().setLevel(logging.DEBUG)
+    
     # Log startup configuration
     logger.info(f"Starting server on port {args.port}")
     logger.info(f"CPU mode: {args.cpu}")
+    logger.info(f"Debug mode: {args.debug}")
     
     # Start uvicorn server
-    uvicorn.run(app, host="0.0.0.0", port=args.port)
+    uvicorn.run(app, host="0.0.0.0", port=args.port, log_level="debug")
