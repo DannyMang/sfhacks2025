@@ -38,7 +38,7 @@ function App() {
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsHost = window.location.hostname;
     const wsPort = 8000; // FastAPI server port
-    const wsUrl = `${wsProtocol}//${wsHost}:${wsPort}/ws/avatar`;
+    const wsUrl = `${wsProtocol}//${wsHost}:${wsPort}/ws`;
     
     addLog(`Connecting to ${wsUrl}...`);
     
