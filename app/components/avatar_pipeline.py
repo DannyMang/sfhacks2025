@@ -110,10 +110,11 @@ class AvatarPipeline:
             self.logger.error(traceback.format_exc())
             raise
     
-    def start(self):
-        """Start the avatar pipeline."""
-        self.is_running.set()
+    async def start(self):
+        """Start the pipeline."""
         self.logger.info("Avatar pipeline started")
+        self.is_running.set()
+        return True  # Return a value to avoid NoneType error
     
     def stop(self):
         """Stop the avatar pipeline."""

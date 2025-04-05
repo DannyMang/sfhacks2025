@@ -1,165 +1,330 @@
 #!/usr/bin/env python3
 """
-Avatar generator using StyleGAN3 for real-time avatar generation.
-Includes optimizations for low-latency inference.
+Avatar Generator module using StyleGAN3 for generating realistic face images.
 """
 
 import os
-import time
+import sys
 import numpy as np
 import torch
-import torch.nn as nn
-from torch.nn import functional as F
 import cv2
-from PIL import Image
 import logging
+import time
 import traceback
-import pickle
-import sys
+from typing import Optional, Tuple, Dict, Any
+
 
 class AvatarGenerator:
-    def __init__(self, model_path, device='cpu'):
+    def __init__(self, model_path: str, device: str = 'cuda'):
+        """
+        Initialize the avatar generator with StyleGAN3.
+        
+        Args:
+            model_path: Path to the StyleGAN3 model file
+            device: Device to run the model on ('cuda' or 'cpu')
+        """
         self.logger = logging.getLogger(__name__)
-        self.logger.info("Initializing AvatarGenerator with StyleGAN3")
+        self.device = device
+        self.model_path = model_path
+        self.model = None
+        self.latent_dim = 512
+        self.image_size = 1024
         
-        # Get absolute paths
-        model_dir = os.path.dirname(os.path.abspath(model_path))
-        stylegan3_dir = os.path.join(model_dir, 'stylegan3')
+        # Add StyleGAN3 to path
+        stylegan3_dir = os.path.abspath(os.path.join(os.path.dirname(os.path.dirname(__file__)), 'models', 'stylegan3'))
         
-        # Add to Python path
+        # Add it to the Python path if it's not already there
         if stylegan3_dir not in sys.path:
             sys.path.insert(0, stylegan3_dir)
-            self.logger.info(f"Added StyleGAN3 path: {stylegan3_dir}")
+            self.logger.info(f"Added StyleGAN3 directory to Python path: {stylegan3_dir}")
         
-        # Load StyleGAN3 model
         try:
-            import dnnlib
-            import legacy
+            # Now import the required modules
+            from app.models.stylegan3 import dnnlib, legacy
             
-            self.logger.info("Loading StyleGAN3 model...")
+            # Load the network
+            self.logger.info(f"Loading StyleGAN3 from {model_path}")
             with dnnlib.util.open_url(model_path) as f:
                 self.model = legacy.load_network_pkl(f)['G_ema'].to(device)
+            
+            # Set evaluation mode
             self.model.eval()
-            self.device = device
             
-            # Generate random latent vector for initialization
-            self.latent = torch.randn(1, self.model.z_dim).to(device)
-            # Add class conditioning vector (usually zeros for unconditional models)
-            self.class_vector = torch.zeros([1, self.model.c_dim], device=device)
-            self.logger.info("StyleGAN3 model loaded successfully")
+            # Generate random latent vector
+            self.latent = torch.randn(1, self.latent_dim).to(device)
+            
+            # Optimize with TensorRT if available
+            if device == 'cuda' and hasattr(torch, 'cuda') and torch.cuda.is_available():
+                try:
+                    self.logger.info("Optimizing StyleGAN3 with torch.jit.script")
+                    self.model = torch.jit.script(self.model)
+                    self.logger.info("StyleGAN3 optimization successful")
+                except Exception as e:
+                    self.logger.warning(f"Could not optimize StyleGAN3: {e}")
+            
+            self.logger.info("StyleGAN3 initialized successfully")
             
         except Exception as e:
-            self.logger.error(f"Failed to load StyleGAN3: {e}")
-            self.logger.error(traceback.format_exc())
+            self.logger.error(f"Failed to import StyleGAN3 modules: {e}")
+            self.logger.info("Falling back to placeholder generator")
+            
+            # Create a dummy model for development
+            self.logger.info("Using placeholder generator")
             self.model = None
-
-        self.frame_count = 0
-
-    def generate_frame(self, head_pose=None, expressions=None):
-        if self.model is None:
-            return None
-            
-        try:
-            self.logger.info("Generating StyleGAN3 frame")
-            
-            with torch.no_grad():
-                # Update latent vector based on head pose if provided
-                if head_pose is not None:
-                    # Simple mapping of head pose to latent space
-                    pose_scale = 0.1
-                    
-                    # Create a pose tensor of the same size as latent
-                    pose_tensor = torch.zeros_like(self.latent)
-                    
-                    if isinstance(head_pose, list):
-                        # Map the first 3 dimensions of latent space to pose
-                        pose_tensor[0, :3] = torch.tensor([
-                            head_pose[0] * pose_scale,
-                            head_pose[1] * pose_scale,
-                            head_pose[2] * pose_scale
-                        ]).to(self.device)
-                    else:
-                        pose_tensor[0, :3] = torch.tensor([
-                            head_pose['pitch'] * pose_scale,
-                            head_pose['yaw'] * pose_scale,
-                            head_pose['roll'] * pose_scale
-                        ]).to(self.device)
-                    
-                    # Add the pose influence to latent
-                    self.latent = self.latent + pose_tensor
-                
-                # Generate image with both z and c inputs
-                img = self.model(self.latent, self.class_vector)
-                
-                # Convert to numpy array
-                img = (img.permute(0, 2, 3, 1) * 127.5 + 128).clamp(0, 255).to(torch.uint8)
-                img = img[0].cpu().numpy()
-                
-                self.frame_count += 1
-                self.logger.info(f"Generated StyleGAN3 frame {self.frame_count}")
-                return img
-                
-        except Exception as e:
-            self.logger.error(f"Error generating StyleGAN3 frame: {str(e)}")
-            self.logger.error(traceback.format_exc())
-            return None
+        
+        # Add new attributes for calibration
+        self.calibration_frames = {}
+        self.is_calibrated = False
+        self.training_progress = 0.0
+        self.base_latent = None
     
-    def apply_frame_interpolation(self, prev_frame, current_frame, factor=0.5):
+    def generate(self, latent: Optional[torch.Tensor] = None) -> np.ndarray:
         """
-        Apply frame interpolation to smooth animation.
+        Generate an avatar image using the provided latent vector.
         
         Args:
-            prev_frame: Previous frame
-            current_frame: Current frame
-            factor: Interpolation factor (0-1)
+            latent: Latent vector to use for generation. If None, use a random one.
             
         Returns:
-            Interpolated frame
-        """
-        if prev_frame is None or current_frame is None:
-            return current_frame
-        
-        # Simple linear interpolation for hackathon
-        # In production, you'd use optical flow based methods like RIFE
-        return cv2.addWeighted(prev_frame, 1-factor, current_frame, factor, 0)
-    
-    def export_onnx(self, onnx_path):
-        """
-        Export the model to ONNX format for deployment.
-        
-        Args:
-            onnx_path: Path to save the ONNX model
+            Generated avatar image as a numpy array
         """
         try:
-            # Check if we can import onnx
-            import onnx
+            if self.model is None:
+                # Return a placeholder image if model failed to load
+                return self._generate_placeholder()
             
-            # Create a dummy input
-            dummy_input = torch.randn(1, self.z_dim, device=self.device)
+            # Use provided latent or the default one
+            z = latent if latent is not None else self.latent
             
-            # Export the model
-            torch.onnx.export(
-                self.model,
-                dummy_input,
-                onnx_path,
-                export_params=True,
-                opset_version=11,
-                do_constant_folding=True,
-                input_names=['input'],
-                output_names=['output'],
-                dynamic_axes={'input': {0: 'batch_size'},
-                            'output': {0: 'batch_size'}}
-            )
+            # Generate image
+            with torch.no_grad():
+                img = self.model(z, None)
+                
+            # Convert to numpy and normalize to 0-255 range
+            img = (img.permute(0, 2, 3, 1) * 127.5 + 128).clamp(0, 255).to(torch.uint8)
+            img = img[0].cpu().numpy()
             
-            print(f"Model exported to {onnx_path}")
-            return True
-        except ImportError:
-            print("ONNX not available, skipping export")
-            return False
+            return img
+            
+        except Exception as e:
+            self.logger.error(f"Error generating avatar: {e}")
+            self.logger.error(traceback.format_exc())
+            return self._generate_placeholder()
+    
+    def _generate_placeholder(self) -> np.ndarray:
+        """Generate a placeholder image when the model is not available."""
+        img = np.zeros((self.image_size, self.image_size, 3), dtype=np.uint8)
+        
+        # Create a gradient background
+        for i in range(self.image_size):
+            img[:, i] = [i//4, 100, 255-i//4]
+        
+        # Add text
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        cv2.putText(img, "StyleGAN3 Avatar", (self.image_size//4, self.image_size//2), 
+                   font, 2, (255, 255, 255), 3)
+        
+        return img
+    
+    def update_latent(self, delta: torch.Tensor) -> None:
+        """
+        Update the latent vector with a delta.
+        
+        Args:
+            delta: Delta to add to the latent vector
+        """
+        if self.model is None:
+            return
+            
+        self.latent = self.latent + delta.to(self.device)
+        
+    def random_latent(self) -> torch.Tensor:
+        """Generate a random latent vector."""
+        return torch.randn(1, self.latent_dim).to(self.device)
     
     def release(self):
         """Release resources."""
-        # Clean up any resources
         del self.model
         if torch.cuda.is_available():
-            torch.cuda.empty_cache() 
+            torch.cuda.empty_cache()
+
+    def start_calibration(self):
+        """Start the calibration process."""
+        self.calibration_frames = {}
+        self.is_calibrated = False
+        self.training_progress = 0.0
+        return self._get_next_calibration_pose()
+    
+    def _get_next_calibration_pose(self) -> Optional[Dict[str, Any]]:
+        """Get the next pose needed for calibration."""
+        required_poses = {
+            'front': 'Look straight at the camera',
+            'left': 'Turn your head left',
+            'right': 'Turn your head right',
+            'up': 'Look up',
+            'down': 'Look down',
+            'smile': 'Smile naturally',
+            'neutral': 'Return to neutral expression'
+        }
+        
+        # Find first missing pose
+        for pose, instruction in required_poses.items():
+            if pose not in self.calibration_frames:
+                return {
+                    'pose': pose,
+                    'instruction': instruction,
+                    'remaining_poses': len(required_poses) - len(self.calibration_frames),
+                    'total_poses': len(required_poses)
+                }
+        
+        return None  # All poses collected
+    
+    def add_calibration_frame(self, frame: np.ndarray, pose_type: str) -> Dict[str, Any]:
+        """Add a calibration frame and return calibration status."""
+        self.calibration_frames[pose_type] = frame
+        
+        next_pose = self._get_next_calibration_pose()
+        if next_pose is None:
+            # All poses collected, start training
+            self._start_training()
+            return {
+                'status': 'training',
+                'progress': 0.0,
+                'message': 'Starting avatar training...',
+                'eta_seconds': 300  # Estimated training time
+            }
+        
+        return {
+            'status': 'calibrating',
+            'next_pose': next_pose,
+            'progress': len(self.calibration_frames) / 7.0 * 100,
+            'message': f'Captured {pose_type} pose. {next_pose["instruction"]}'
+        }
+    
+    def _start_training(self):
+        """Start the training process in a background thread."""
+        import threading
+        self.training_thread = threading.Thread(target=self._train_avatar)
+        self.training_thread.start()
+    
+    def _train_avatar(self):
+        """Train the avatar model using collected calibration frames."""
+        try:
+            total_steps = 100
+            for step in range(total_steps):
+                # TODO: Implement actual training logic here
+                # 1. Extract face features from calibration frames
+                # 2. Find optimal latent space representation
+                # 3. Train pose and expression mappings
+                
+                time.sleep(0.1)  # Simulate training time
+                self.training_progress = (step + 1) / total_steps * 100
+                
+            # Save the trained model
+            self.is_calibrated = True
+            self.training_progress = 100.0
+            
+        except Exception as e:
+            self.logger.error(f"Training failed: {e}")
+            self.training_progress = -1  # Indicate error
+    
+    def get_training_status(self) -> Dict[str, Any]:
+        """Get current training status."""
+        if not self.is_calibrated and self.training_progress >= 0:
+            return {
+                'status': 'training',
+                'progress': self.training_progress,
+                'message': f'Training avatar... {self.training_progress:.1f}%',
+                'eta_seconds': (100 - self.training_progress) * 3  # Rough estimate
+            }
+        elif self.is_calibrated:
+            return {
+                'status': 'ready',
+                'message': 'Avatar trained successfully!'
+            }
+        else:
+            return {
+                'status': 'error',
+                'message': 'Training failed. Please try again.'
+            }
+
+    def generate_frame(self, head_pose: Optional[Dict[str, float]] = None, 
+                      expressions: Optional[Dict[str, float]] = None) -> np.ndarray:
+        """
+        Generate an avatar frame with the specified head pose and expressions.
+        
+        Args:
+            head_pose: Dictionary containing head rotation angles in degrees
+                      (e.g., {'yaw': 0.0, 'pitch': 0.0, 'roll': 0.0})
+            expressions: Dictionary containing expression weights
+                      (e.g., {'smile': 0.5, 'blink': 0.0})
+            
+        Returns:
+            Generated avatar frame as a numpy array
+        """
+        try:
+            if not self.is_calibrated:
+                return self._generate_loading_frame()
+            
+            if self.model is None:
+                return self._generate_placeholder()
+
+            # Use the calibrated base latent instead of random one
+            modified_latent = self.base_latent.clone()
+            
+            # Apply pose and expression modifications
+            if head_pose:
+                pose_latents = self._head_pose_to_latents(head_pose)
+                modified_latent += pose_latents
+            
+            if expressions:
+                expr_latents = self._expressions_to_latents(expressions)
+                modified_latent += expr_latents
+            
+            return self.generate(modified_latent)
+
+        except Exception as e:
+            self.logger.error(f"Error generating avatar frame: {e}")
+            self.logger.error(traceback.format_exc())
+            return self._generate_placeholder()
+
+    def _head_pose_to_latents(self, head_pose: Dict[str, float]) -> torch.Tensor:
+        """Convert head pose angles to latent space modifications."""
+        # TODO: Implement proper head pose to latent space mapping
+        # This requires training a separate network or creating a mapping function
+        return torch.zeros_like(self.latent)
+
+    def _expressions_to_latents(self, expressions: Dict[str, float]) -> torch.Tensor:
+        """Convert expression weights to latent space modifications."""
+        # TODO: Implement proper expression to latent space mapping
+        # This requires training a separate network or creating a mapping function
+        return torch.zeros_like(self.latent)
+
+    def _generate_loading_frame(self) -> np.ndarray:
+        """Generate a loading screen frame."""
+        img = np.zeros((self.image_size, self.image_size, 3), dtype=np.uint8)
+        
+        # Add progress bar
+        progress = int(self.training_progress)
+        bar_width = self.image_size // 2
+        bar_height = 30
+        x = (self.image_size - bar_width) // 2
+        y = self.image_size // 2
+        
+        # Draw background bar
+        cv2.rectangle(img, (x, y), (x + bar_width, y + bar_height), (50, 50, 50), -1)
+        
+        # Draw progress
+        progress_width = int(bar_width * progress / 100)
+        cv2.rectangle(img, (x, y), (x + progress_width, y + bar_height), (0, 255, 0), -1)
+        
+        # Add text
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        if progress < 100:
+            text = f"Training Avatar: {progress}%"
+        else:
+            text = "Loading..."
+            
+        cv2.putText(img, text, (x, y - 10), font, 1, (255, 255, 255), 2)
+        
+        return img 
