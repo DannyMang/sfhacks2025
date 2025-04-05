@@ -15,6 +15,7 @@ import threading
 import atexit
 import webbrowser
 import platform
+import gdown
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -22,6 +23,14 @@ logger = logging.getLogger(__name__)
 
 # Global variables to track processes
 processes = []
+
+# Define model URLs and output paths
+MODEL_URLS = {
+    'stylegan3_t.pt': 'https://drive.google.com/uc?id=1Yr7KuD959btpmcKGAUsbAk5rPjX2MytK',
+    'wav2lip.pth': 'https://drive.google.com/uc?id=1Yr7KuD959btpmcKGAUsbAk5rPjX2MytK'
+}
+
+MODEL_DIR = 'app/models'
 
 def signal_handler(sig, frame):
     """Handle keyboard interrupt (Ctrl+C)."""
@@ -119,18 +128,30 @@ def download_models(dummy=False, force=False):
     """Run the script to download pre-trained models."""
     logger.info("Downloading pre-trained models...")
     
-    cmd = [sys.executable, "download_models.py"]
+    if not os.path.exists(MODEL_DIR):
+        os.makedirs(MODEL_DIR)
     
+    for model_name, url in MODEL_URLS.items():
+        output_path = os.path.join(MODEL_DIR, model_name)
+        if not os.path.exists(output_path):
+            logger.info(f"Downloading {model_name}...")
+            try:
+                gdown.download(url, output_path, quiet=False)
+                logger.info(f"Successfully downloaded {model_name}")
+            except Exception as e:
+                logger.error(f"Error downloading {model_name}: {e}")
+        else:
+            logger.info(f"{model_name} already exists, skipping download.")
+
     if dummy:
-        cmd.append("--dummy")
         logger.info("Using dummy model files for development")
     
     if force:
-        cmd.append("--force")
+        logger.info("Force re-download of models")
     
     try:
         process = subprocess.run(
-            cmd,
+            [sys.executable, "download_models.py"],
             check=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
