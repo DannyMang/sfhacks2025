@@ -3,6 +3,7 @@ import './App.css';
 import WebcamView from './components/WebcamView';
 import AvatarView from './components/AvatarView';
 import ControlPanel from './components/ControlPanel';
+import CalibrationView from './components/CalibrationView';
 
 function App() {
   const [connected, setConnected] = useState(false);
@@ -12,6 +13,8 @@ function App() {
   const [fps, setFps] = useState(0);
   const [status, setStatus] = useState('Idle');
   const [logs, setLogs] = useState(['System ready. Connect to WebSocket server to begin.']);
+  const [calibrated, setCalibrated] = useState(false);
+  const [calibrating, setCalibrating] = useState(false);
   
   const websocketRef = useRef(null);
   const mediaStreamRef = useRef(null);
@@ -34,6 +37,7 @@ function App() {
   };
   
   // Connect to WebSocket
+  // Fixed WebSocket connection function
   const connectWebSocket = () => {
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsHost = window.location.hostname;
@@ -45,31 +49,69 @@ function App() {
     try {
       const ws = new WebSocket(wsUrl);
       
+      // Add connection timeout
+      const connectionTimeout = setTimeout(() => {
+        if (ws.readyState !== WebSocket.OPEN) {
+          addLog('WebSocket connection timeout - server not responding');
+          setStatus('Error');
+          // Close the connection attempt if it's still pending
+          if (ws.readyState === WebSocket.CONNECTING) {
+            ws.close();
+          }
+        }
+      }, 5000);
+      
       ws.onopen = function(event) {
+        clearTimeout(connectionTimeout);
         addLog('WebSocket connection established');
         setConnected(true);
         setStatus('Connected');
         startFpsCounter();
+        
+        // Send a ping message to test the connection
+        ws.send(JSON.stringify({
+          type: "ping",
+          timestamp: Date.now()
+        }));
       };
       
       ws.onmessage = function(event) {
-        const data = JSON.parse(event.data);
-        console.log('Received WebSocket message:', data);
-        
-        if (data.type === 'video' && data.frame) {
-          console.log('Rendering frame');
-          renderAvatarFrame(data.frame);
-          framesReceivedRef.current++;
+        try {
+          const data = JSON.parse(event.data);
+          console.log('Received WebSocket message:', data);
+          
+          if (data.type === 'video' && data.frame) {
+            console.log('Rendering frame');
+            renderAvatarFrame(data.frame);
+            framesReceivedRef.current++;
+          } else if (data.type === 'pong') {
+            console.log('Ping-pong successful');
+            addLog('Server connection confirmed');
+          } else if (data.type === 'error') {
+            console.error('Server error:', data.message);
+            addLog(`Server error: ${data.message}`);
+          }
+        } catch (err) {
+          console.error('Error parsing WebSocket message:', err, 'Raw message:', event.data);
+          addLog('Error parsing server message');
         }
       };
       
       ws.onerror = function(error) {
-        addLog(`WebSocket error: ${error}`);
+        clearTimeout(connectionTimeout);
+        console.error('WebSocket error:', error);
+        addLog(`WebSocket error: ${error.message || 'Connection failed'}`);
         setStatus('Error');
       };
       
       ws.onclose = function(event) {
-        addLog('WebSocket connection closed');
+        clearTimeout(connectionTimeout);
+        console.log('WebSocket closed:', {
+          code: event.code,
+          reason: event.reason,
+          wasClean: event.wasClean
+        });
+        addLog(`WebSocket closed: ${event.wasClean ? 'Clean disconnect' : 'Connection lost'} (Code: ${event.code})`);
         setConnected(false);
         setStatus('Disconnected');
         stopFpsCounter();
@@ -77,7 +119,9 @@ function App() {
       
       websocketRef.current = ws;
     } catch (error) {
+      console.error('Error creating WebSocket:', error);
       addLog(`Error connecting to WebSocket: ${error.message}`);
+      setStatus('Error');
     }
   };
   
@@ -250,6 +294,44 @@ function App() {
     }
   };
   
+    
+  // Add calibration handlers
+  const startCalibration = async () => {
+    try {
+      // First check if we're connected
+      if (!connected || !websocketRef.current) {
+        addLog('Please connect to WebSocket first');
+        return;
+      }
+
+      // Check if camera is active
+      if (!cameraActive) {
+        addLog('Please start camera first');
+        return;
+      }
+
+      setCalibrating(true);
+      addLog('Starting avatar calibration...');
+      setStatus('Calibrating');
+      
+    } catch (error) {
+      console.error('Calibration error:', error);
+      addLog(`Calibration error: ${error.message}`);
+      setCalibrating(false);
+    }
+  };
+    
+  const handleCalibrationComplete = () => {
+    setCalibrating(false);
+    setCalibrated(true);
+    addLog('Avatar calibration complete!');
+  };
+    
+  const handleCalibrationError = (error) => {
+    setCalibrating(false);
+    addLog(`Calibration error: ${error.message}`);
+  };
+  
   // Cleanup on unmount
   useEffect(() => {
     return () => {
@@ -268,7 +350,15 @@ function App() {
       
       <div className="container">
         <WebcamView webcamRef={webcamRef} />
-        <AvatarView canvasRef={avatarCanvasRef} />
+        {calibrating ? (
+          <CalibrationView 
+            webcamRef={webcamRef}
+            onCalibrationComplete={handleCalibrationComplete}
+            onCalibrationError={handleCalibrationError}
+          />
+        ) : (
+          <AvatarView canvasRef={avatarCanvasRef} />
+        )}
       </div>
       
       <div className="container">
@@ -286,6 +376,10 @@ function App() {
           onStopCamera={stopWebcam}
           onStartAudio={startAudio}
           onStopAudio={stopAudio}
+          calibrated={calibrated}
+          calibrating={calibrating}
+          onStartCalibration={startCalibration}
+          disabled={!connected || calibrating}
         />
       </div>
       

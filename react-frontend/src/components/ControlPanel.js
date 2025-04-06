@@ -13,7 +13,11 @@ const ControlPanel = ({
   onStartCamera,
   onStopCamera,
   onStartAudio,
-  onStopAudio
+  onStopAudio,
+  calibrated,
+  onStartCalibration,
+  disabled,
+  calibrating
 }) => {
   return (
     <div className="controls">
@@ -33,6 +37,17 @@ const ControlPanel = ({
         <h3>Audio Controls</h3>
         <button onClick={onStartAudio} disabled={audioActive}>Start Microphone</button>
         <button onClick={onStopAudio} disabled={!audioActive}>Stop Microphone</button>
+      </div>
+      
+      <div className="control-group">
+        <h3>Avatar Controls</h3>
+        <button 
+          onClick={onStartCalibration} 
+          disabled={disabled || calibrated}
+          className={calibrated ? 'button-success' : ''}
+        >
+          {calibrated ? '✓ Calibrated' : calibrating ? 'Calibrating...' : 'Start Calibration'}
+        </button>
       </div>
       
       <div className="status">

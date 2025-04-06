@@ -142,6 +142,31 @@ class AvatarGenerator:
         """Generate a random latent vector."""
         return torch.randn(1, self.latent_dim).to(self.device)
     
+    def get_training_status(self):
+        """Get the current training status."""
+        if self.training_progress < 0:
+            return {
+                "status": "error",
+                "message": "Training failed"
+            }
+        elif self.training_progress >= 100:
+            return {
+                "status": "complete",
+                "progress": 100.0,
+                "message": "Avatar training complete"
+            }
+        elif self.training_progress > 0:
+            return {
+                "status": "training",
+                "progress": self.training_progress,
+                "message": f"Training avatar model: {self.training_progress:.1f}% complete"
+            }
+        else:
+            return {
+                "status": "waiting",
+                "message": "Waiting for calibration frames"
+            }
+    
     def release(self):
         """Release resources."""
         del self.model
@@ -153,37 +178,13 @@ class AvatarGenerator:
         self.calibration_frames = {}
         self.is_calibrated = False
         self.training_progress = 0.0
-        return self._get_next_calibration_pose()
-    
-    def _get_next_calibration_pose(self) -> Optional[Dict[str, Any]]:
-        """Get the next pose needed for calibration."""
-        required_poses = {
-            'front': 'Look straight at the camera',
-            'left': 'Turn your head left',
-            'right': 'Turn your head right',
-            'up': 'Look up',
-            'down': 'Look down',
-            'smile': 'Smile naturally',
-            'neutral': 'Return to neutral expression'
-        }
-        
-        # Find first missing pose
-        for pose, instruction in required_poses.items():
-            if pose not in self.calibration_frames:
-                return {
-                    'pose': pose,
-                    'instruction': instruction,
-                    'remaining_poses': len(required_poses) - len(self.calibration_frames),
-                    'total_poses': len(required_poses)
-                }
-        
-        return None  # All poses collected
+        return self.get_next_calibration_pose()
     
     def add_calibration_frame(self, frame: np.ndarray, pose_type: str) -> Dict[str, Any]:
         """Add a calibration frame and return calibration status."""
         self.calibration_frames[pose_type] = frame
         
-        next_pose = self._get_next_calibration_pose()
+        next_pose = self.get_next_calibration_pose()
         if next_pose is None:
             # All poses collected, start training
             self._start_training()
@@ -220,33 +221,56 @@ class AvatarGenerator:
                 time.sleep(0.1)  # Simulate training time
                 self.training_progress = (step + 1) / total_steps * 100
                 
+            # Set a base latent vector for the avatar
+            # In a real implementation, this would be derived from the calibration frames
+            self.base_latent = torch.randn(1, self.latent_dim).to(self.device)
+            
             # Save the trained model
             self.is_calibrated = True
             self.training_progress = 100.0
             
         except Exception as e:
             self.logger.error(f"Training failed: {e}")
+            self.logger.error(traceback.format_exc())
             self.training_progress = -1  # Indicate error
     
-    def get_training_status(self) -> Dict[str, Any]:
-        """Get current training status."""
-        if not self.is_calibrated and self.training_progress >= 0:
-            return {
-                'status': 'training',
-                'progress': self.training_progress,
-                'message': f'Training avatar... {self.training_progress:.1f}%',
-                'eta_seconds': (100 - self.training_progress) * 3  # Rough estimate
-            }
-        elif self.is_calibrated:
-            return {
-                'status': 'ready',
-                'message': 'Avatar trained successfully!'
-            }
-        else:
-            return {
-                'status': 'error',
-                'message': 'Training failed. Please try again.'
-            }
+    def reset_calibration(self):
+        """Reset the calibration state."""
+        self.calibration_frames = {}
+        self.is_calibrated = False
+        self.training_progress = 0
+
+    def get_next_calibration_pose(self):
+        """Get the next pose for calibration."""
+        poses = [
+            'front', 'left', 'right', 'up', 'down', 'smile', 'surprise'
+        ]
+        
+        # Filter out poses that have already been captured
+        remaining_poses = [pose for pose in poses if pose not in self.calibration_frames]
+        
+        if not remaining_poses:
+            return None
+        
+        next_pose = remaining_poses[0]
+        
+        # Instructions for each pose
+        instructions = {
+            'front': 'Look straight at the camera',
+            'left': 'Turn your head to the left',
+            'right': 'Turn your head to the right',
+            'up': 'Look up',
+            'down': 'Look down',
+            'smile': 'Smile naturally',
+            'surprise': 'Show a surprised expression'
+        }
+        
+        return {
+            'pose': next_pose,
+            'instruction': instructions[next_pose],
+            'remaining_poses': len(remaining_poses),
+            'total_poses': len(poses)
+        }
 
     def generate_frame(self, head_pose: Optional[Dict[str, float]] = None, 
                       expressions: Optional[Dict[str, float]] = None) -> np.ndarray:
@@ -269,6 +293,11 @@ class AvatarGenerator:
             if self.model is None:
                 return self._generate_placeholder()
 
+            # Check if base_latent is available
+            if self.base_latent is None:
+                self.logger.warning("Base latent is None, using random latent instead")
+                self.base_latent = torch.randn(1, self.latent_dim).to(self.device)
+            
             # Use the calibrated base latent instead of random one
             modified_latent = self.base_latent.clone()
             

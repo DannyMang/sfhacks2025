@@ -53,6 +53,8 @@ class AvatarPipeline:
         
         # Worker threads
         self.worker_threads = []
+        
+        self.calibration_mode = False
     
     def initialize_pipeline(self):
         """Initialize all pipeline components."""
@@ -212,3 +214,32 @@ class AvatarPipeline:
     def get_result(self, timeout=0.1):
         """Get the latest processed frame."""
         return self.prev_frame 
+
+    async def start_calibration(self):
+        """Start calibration mode."""
+        self.calibration_mode = True
+        if self.avatar_generator:
+            return self.avatar_generator.start_calibration()
+        return None
+        
+    async def process_calibration_frame(self, frame_data: str, pose_type: str):
+        """Process a calibration frame."""
+        try:
+            # Decode frame similar to process_frame
+            frame_bytes = base64.b64decode(frame_data.split(',')[1])
+            nparr = np.frombuffer(frame_bytes, np.uint8)
+            frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            
+            if frame is None:
+                raise ValueError("Failed to decode frame")
+                
+            # Add frame to calibration
+            if self.avatar_generator:
+                return self.avatar_generator.add_calibration_frame(frame, pose_type)
+            
+            return None
+            
+        except Exception as e:
+            self.logger.error(f"Error processing calibration frame: {e}")
+            self.logger.error(traceback.format_exc())
+            return None 
